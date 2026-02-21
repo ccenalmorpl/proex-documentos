@@ -1,0 +1,49 @@
+{
+  "uid": "app-documentos-proex-card",
+  "type": "app",
+  "config": {
+    "description": "Documentos PROEX - CRM card para generación automática de certificados oficiales (Origen y Sanitario) asociados a contenedores. Permite seleccionar contenedores y generar PDFs desde plantillas.",
+    "name": "Documentos PROEX",
+    "distribution": "private",
+    "auth": {
+      "type": "static",
+      "requiredScopes": [
+        "oauth",
+        "crm.objects.contacts.read",
+        "crm.objects.contacts.write",
+        "crm.objects.companies.read",
+        "crm.objects.companies.write",
+        "crm.objects.deals.read",
+        "crm.objects.deals.write",
+        "crm.objects.line_items.read",
+        "crm.objects.line_items.write",
+        "crm.objects.quotes.read",
+        "crm.objects.quotes.write",
+        "crm.schemas.custom.read",
+        "crm.schemas.deals.read",
+        "crm.schemas.contacts.read",
+        "crm.schemas.companies.read",
+        "crm.objects.products.read",
+        "crm.schemas.custom.write",
+        "crm.objects.custom.write",
+        "hubdb"
+      ],
+      "optionalScopes": [],
+      "conditionallyRequiredScopes": []
+    },
+    "permittedUrls": {
+      "fetch": [
+        "https://api.hubapi.com",
+        "https://2tqk2gn9n3.execute-api.eu-south-2.amazonaws.com"
+      ],
+      "iframe": [],
+      "img": []
+    },
+    "support": {
+      "supportEmail": "support@proex.com",
+      "documentationUrl": "https://proex.com/docs/documentos",
+      "supportUrl": "https://proex.com/support",
+      "supportPhone": "+34900000000"
+    }
+  }
+}
