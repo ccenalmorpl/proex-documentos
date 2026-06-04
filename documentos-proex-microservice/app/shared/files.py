@@ -1,13 +1,53 @@
-"""Helpers para subida y borrado de archivos en HubSpot File Manager."""
-
+import io
+import json
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
-from app.shared.hubspot_client import hubspot_client
+import requests
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+FILES_API_URL = "https://api.hubapi.com/files/v3/files"
+
+
+def parse_file_ids(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    return [chunk.strip() for chunk in raw.split(";") if chunk.strip()]
+
+
+def serialize_file_ids(ids: List[str]) -> str:
+    return ";".join(ids)
+
+
+@dataclass
+class FileMetadata:
+    file_id: str
+    name: str
+    url: Optional[str]
+
+
+def fetch_file_metadata(file_id: str) -> Optional[FileMetadata]:
+    headers = {"Authorization": f"Bearer {settings.proex_access_token}"}
+    url = f"{FILES_API_URL}/{file_id}"
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        if resp.status_code == 404:
+            logger.warning(f"[FILE_METADATA] file_id={file_id!r} no existe (404)")
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        return FileMetadata(
+            file_id=str(data.get("id") or file_id),
+            name=str(data.get("name") or ""),
+            url=data.get("url"),
+        )
+    except Exception as e:
+        logger.warning(f"[FILE_METADATA] fallo file_id={file_id!r}: {e}")
+        return None
 
 
 @dataclass
@@ -17,48 +57,55 @@ class FileUploadResult:
     name: str
 
 
+def upload_file(
+    file_bytes: bytes,
+    filename: str,
+    mime_type: str = "application/pdf",
+    folder_path: Optional[str] = None,
+) -> FileUploadResult:
+    """Sube un archivo al HubSpot File Manager y devuelve su file_id y URL."""
+    folder = folder_path or settings.files_folder
+    headers = {"Authorization": f"Bearer {settings.proex_access_token}"}
+    options = json.dumps({"access": "PUBLIC_NOT_INDEXABLE", "overwrite": False})
+
+    logger.info(f"[FILE_UPLOAD] Subiendo {filename!r} ({mime_type}) a {folder!r}")
+
+    resp = requests.post(
+        FILES_API_URL,
+        headers=headers,
+        files={"file": (filename, io.BytesIO(file_bytes), mime_type)},
+        data={"options": options, "folderPath": folder, "fileName": filename},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    file_id = str(data["id"])
+    file_url = data.get("url", "")
+    logger.info(f"[FILE_UPLOADED] file_id={file_id} url={file_url!r}")
+
+    return FileUploadResult(file_id=file_id, file_url=file_url, name=filename)
+
+
 def upload_pdf(
     file_bytes: bytes,
     filename: str,
     folder_path: Optional[str] = None,
 ) -> FileUploadResult:
-    """Sube un PDF al HubSpot File Manager.
-
-    Args:
-        file_bytes: Contenido del PDF como bytes.
-        filename: Nombre del archivo (ej. "origen_borrador_2026.pdf").
-        folder_path: Carpeta destino en File Manager. Si es None usa settings.files_folder.
-
-    Returns:
-        FileUploadResult con file_id y file_url públicos.
-
-    Raises:
-        Exception: Si la subida falla.
-    """
-    folder = folder_path or settings.files_folder
-    client = hubspot_client.get_client()
-
-    # TODO: Implementar subida con hubspot Files API
-    # La API de Files de HubSpot requiere multipart/form-data.
-    # Referencia: client.files.files_api.upload(...)
-    # o bien vía requests directo a https://api.hubapi.com/files/v3/files
-    raise NotImplementedError("upload_pdf: pendiente de implementación")
+    return upload_file(file_bytes, filename, "application/pdf", folder_path)
 
 
 def delete_file(file_id: str) -> bool:
-    """Borra un archivo del HubSpot File Manager por su ID.
+    headers = {"Authorization": f"Bearer {settings.proex_access_token}"}
+    url = f"{FILES_API_URL}/{file_id}"
 
-    Args:
-        file_id: ID del archivo en HubSpot File Manager.
+    logger.info(f"[FILE_DELETE] Borrando file_id={file_id!r}")
+    resp = requests.delete(url, headers=headers, timeout=30)
 
-    Returns:
-        True si el borrado fue exitoso.
+    if resp.status_code == 404:
+        logger.info(f"[FILE_DELETE] file_id={file_id!r} no existe (404), tratado como éxito")
+        return True
 
-    Raises:
-        Exception: Si el borrado falla (no borra parcialmente — ver rollback).
-    """
-    client = hubspot_client.get_client()
-
-    # TODO: Implementar borrado con hubspot Files API
-    # client.files.files_api.archive(file_id=file_id)
-    raise NotImplementedError("delete_file: pendiente de implementación")
+    resp.raise_for_status()
+    logger.info(f"[FILE_DELETED] file_id={file_id!r} status={resp.status_code}")
+    return True

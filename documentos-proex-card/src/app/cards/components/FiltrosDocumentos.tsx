@@ -1,14 +1,3 @@
-/**
- * FiltrosDocumentos — Filtros SAP-like compartidos por Tab 1 y Tab 2.
- *
- * Props:
- *   filtros         Estado actual de los filtros
- *   onChange        Callback para actualizar un campo del filtro
- *   docTypeOptions  Opciones de checkboxes (pendientes o creados según el tab)
- *   onApply         Callback para ejecutar la búsqueda con los filtros actuales
- *   loading         Deshabilita el botón mientras hay una petición en curso
- */
-
 import React from "react";
 import {
   Box,
@@ -19,10 +8,10 @@ import {
   ToggleGroup,
   Button,
   Heading,
-  Divider,
+  Text,
 } from "@hubspot/ui-extensions";
 
-import type { FiltrosState } from "../utils/documentos.utils";
+import type { FiltrosState, BaseDate } from "../utils/documentos.utils";
 import { DOC_TYPE_LABELS, ALL_DOC_TYPES } from "../constants/documentos.constants";
 
 interface DocTypeOption {
@@ -32,10 +21,12 @@ interface DocTypeOption {
 
 interface FiltrosDocumentosProps {
   filtros: FiltrosState;
-  onChange: (field: keyof FiltrosState, value: string | string[]) => void;
+  onChange: (field: keyof FiltrosState, value: string | string[] | BaseDate | null) => void;
   docTypeOptions?: DocTypeOption[];
   onApply: () => void;
   loading?: boolean;
+  docTypeTooltip?: string;
+  docTypeMicrocopy?: string;
 }
 
 const DEFAULT_DOC_OPTIONS: DocTypeOption[] = ALL_DOC_TYPES.map((t) => ({
@@ -49,70 +40,85 @@ const FiltrosDocumentos: React.FC<FiltrosDocumentosProps> = ({
   docTypeOptions = DEFAULT_DOC_OPTIONS,
   onApply,
   loading = false,
+  docTypeTooltip = "",
+  docTypeMicrocopy = "Selecciona al menos un tipo.",
 }) => {
+  const canApply =
+    filtros.empresa.trim() !== "" && filtros.tipos_documento.length > 0;
+
   return (
     <Box>
       <Heading>Filtros</Heading>
-      <Divider />
+      <Text variant="microcopy">
+        Selecciona empresa y tipo de documento para buscar. Los campos marcados con * son obligatorios.
+      </Text>
       <Form>
         <Flex direction="column" gap="small">
 
-          {/* Empresa / Cliente */}
           <SearchInput
             label="Empresa (cliente)"
             name="empresa"
             value={filtros.empresa}
             onInput={(v: string) => onChange("empresa", v)}
-            placeholder="Buscar por nombre de empresa..."
+            placeholder=""
+            required
+            description="Nombre (parcial o completo) de la empresa cliente asociada al contenedor."
+            tooltip="Filtra por el nombre de la empresa. Admite búsqueda parcial (p. ej. 'Agro' encuentra 'Agroexport S.L.')."
           />
 
-          {/* Rango fecha de carga */}
-          <Flex direction="row" gap="small">
-            <DateInput
-              label="Fecha carga — desde"
-              name="fecha_carga_desde"
-              value={filtros.fecha_carga_desde}
-              onChange={(v: string) => onChange("fecha_carga_desde", v)}
-            />
-            <DateInput
-              label="Fecha carga — hasta"
-              name="fecha_carga_hasta"
-              value={filtros.fecha_carga_hasta}
-              onChange={(v: string) => onChange("fecha_carga_hasta", v)}
-            />
-          </Flex>
-
-          {/* Rango fecha creación cotización */}
-          <Flex direction="row" gap="small">
-            <DateInput
-              label="Fecha cotización — desde"
-              name="fecha_cotizacion_desde"
-              value={filtros.fecha_cotizacion_desde}
-              onChange={(v: string) => onChange("fecha_cotizacion_desde", v)}
-            />
-            <DateInput
-              label="Fecha cotización — hasta"
-              name="fecha_cotizacion_hasta"
-              value={filtros.fecha_cotizacion_hasta}
-              onChange={(v: string) => onChange("fecha_cotizacion_hasta", v)}
-            />
-          </Flex>
-
-          {/* Tipos de documento */}
           <ToggleGroup
-            label="Tipo de documento"
+            label="Tipo de documento *"
             name="tipos_documento"
             toggleType="checkboxList"
             options={docTypeOptions}
             value={filtros.tipos_documento}
             onChange={(values: string[]) => onChange("tipos_documento", values)}
+            tooltip={docTypeTooltip}
           />
+          <Text variant="microcopy">{docTypeMicrocopy}</Text>
 
-          {/* Aplicar filtros */}
+          <Flex direction="row" gap="small">
+            <DateInput
+              label="ETD — desde"
+              name="etd_desde"
+              value={filtros.etd_desde ?? undefined}
+              onChange={(v) => onChange("etd_desde", v)}
+              description="Opcional. Límite inicial del rango."
+              tooltip="Estimated Time of Departure del contenedor. Filtra desde este día inclusive."
+            />
+            <DateInput
+              label="ETD — hasta"
+              name="etd_hasta"
+              value={filtros.etd_hasta ?? undefined}
+              onChange={(v) => onChange("etd_hasta", v)}
+              description="Opcional. Límite final del rango."
+              tooltip="Estimated Time of Departure del contenedor. Filtra hasta este día inclusive."
+            />
+          </Flex>
+
+          <Flex direction="row" gap="small">
+            <DateInput
+              label="ETA — desde"
+              name="eta_desde"
+              value={filtros.eta_desde ?? undefined}
+              onChange={(v) => onChange("eta_desde", v)}
+              description="Opcional. Límite inicial del rango."
+              tooltip="Estimated Time of Arrival del contenedor. Filtra desde este día inclusive."
+            />
+            <DateInput
+              label="ETA — hasta"
+              name="eta_hasta"
+              value={filtros.eta_hasta ?? undefined}
+              onChange={(v) => onChange("eta_hasta", v)}
+              description="Opcional. Límite final del rango."
+              tooltip="Estimated Time of Arrival del contenedor. Filtra hasta este día inclusive."
+            />
+          </Flex>
+
           <Button
             variant="primary"
             onClick={onApply}
-            disabled={loading}
+            disabled={loading || !canApply}
           >
             {loading ? "Cargando..." : "Aplicar filtros"}
           </Button>

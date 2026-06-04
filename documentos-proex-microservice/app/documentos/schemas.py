@@ -1,11 +1,7 @@
-"""Schemas Pydantic para el módulo documentos."""
-
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
-
-# ── Health ─────────────────────────────────────────────────────────────────
 
 class HealthResponse(BaseModel):
     status: str
@@ -13,46 +9,42 @@ class HealthResponse(BaseModel):
     timestamp: datetime
 
 
-# ── Filtros (compartidos Tab 1 y Tab 2) ───────────────────────────────────
-
 class FiltrosDocumentos(BaseModel):
-    """Filtros SAP-like disponibles en ambos tabs."""
     empresa: Optional[str] = Field(None, description="Nombre o ID de la empresa (cliente)")
-    fecha_carga_desde: Optional[str] = Field(None, description="Fecha carga contenedor - desde (YYYY-MM-DD)")
-    fecha_carga_hasta: Optional[str] = Field(None, description="Fecha carga contenedor - hasta (YYYY-MM-DD)")
-    fecha_cotizacion_desde: Optional[str] = Field(None, description="Fecha creación cotización - desde (YYYY-MM-DD)")
-    fecha_cotizacion_hasta: Optional[str] = Field(None, description="Fecha creación cotización - hasta (YYYY-MM-DD)")
+    etd_desde: Optional[str] = Field(None, description="ETD contenedor - desde (YYYY-MM-DD)")
+    etd_hasta: Optional[str] = Field(None, description="ETD contenedor - hasta (YYYY-MM-DD)")
+    eta_desde: Optional[str] = Field(None, description="ETA contenedor - desde (YYYY-MM-DD)")
+    eta_hasta: Optional[str] = Field(None, description="ETA contenedor - hasta (YYYY-MM-DD)")
     tipos_documento: Optional[List[str]] = Field(
         None,
         description="Tipos de documento a filtrar: origen_borrador, origen_final, sanitario"
     )
 
 
-# ── Contenedor en listados ─────────────────────────────────────────────────
-
 class DocInfo(BaseModel):
-    """Información de un documento generado para un tipo de cert."""
     doc_type: str
-    file_id: Optional[str] = None
+    generated: bool = False
+    required: bool = True
+    group_id: Optional[str] = None
     file_url: Optional[str] = None
-    generated_at: Optional[str] = None
-    group_generation_id: Optional[str] = None
 
 
 class ContenedorListItem(BaseModel):
-    """Representación de un contenedor en los listados de Tab 1 y Tab 2."""
     id: str
     name: str
     nombre_cliente: Optional[str] = None
-    fecha_carga: Optional[str] = None
-    fecha_cotizacion: Optional[str] = None
+    etd: Optional[str] = None
+    eta: Optional[str] = None
+    deal_id: Optional[str] = None
+    deal_name: Optional[str] = None
     docs: List[DocInfo] = Field(default_factory=list, description="Estado de docs por tipo")
+    deal_properties: Optional[dict] = Field(
+        default=None,
+        description="Propiedades del deal asociado al contenedor (certificado_origen_mercancia, observaciones)"
+    )
 
-
-# ── POST /api/v1/documentos/pending ───────────────────────────────────────
 
 class PendingRequest(BaseModel):
-    """Solicitud para obtener contenedores con documentos pendientes."""
     deal_id: str = Field(..., description="ID del Deal en HubSpot")
     filtros: FiltrosDocumentos = Field(default_factory=FiltrosDocumentos)
 
@@ -64,17 +56,26 @@ class PendingResponse(BaseModel):
     total: int = 0
 
 
-# ── POST /api/v1/documentos/generate ──────────────────────────────────────
-
 class GenerateRequest(BaseModel):
-    """Solicitud para generar 1–3 tipos de documento para un grupo de contenedores."""
-    deal_id: str = Field(..., description="ID del Deal en HubSpot")
+    """Genera 1–3 tipos de documento para un grupo de contenedores. Todos los contenedores deben pertenecer al mismo Deal."""
     container_ids: List[str] = Field(..., min_length=1, description="IDs de los contenedores del grupo")
     doc_types: List[str] = Field(
         ...,
         min_length=1,
         max_length=3,
         description="Tipos a generar: origen_borrador, origen_final, sanitario"
+    )
+    descripcion_mercancia: Optional[str] = Field(
+        default=None,
+        description="Override de descripción de mercancía para el certificado de origen (editable pre-generación)"
+    )
+    observaciones: Optional[str] = Field(
+        default=None,
+        description="Observaciones concatenadas de los deals de los contenedores seleccionados"
+    )
+    idioma: Literal["ES", "EN", "FR"] = Field(
+        default="ES",
+        description="Idioma para el certificado de origen: ES, EN, FR."
     )
 
 
@@ -88,15 +89,19 @@ class GeneratedDocResult(BaseModel):
 class GenerateResponse(BaseModel):
     success: bool
     error: Optional[str] = None
-    group_generation_id: Optional[str] = None
+    documents_data: Optional[dict] = Field(
+        default=None,
+        description="Datos agregados por doc_type para rellenar los PDFs"
+    )
+    group_generation_ids: dict = Field(
+        default_factory=dict,
+        description="group_generation_id por doc_type: {doc_type: uuid}"
+    )
     generated_docs: List[GeneratedDocResult] = Field(default_factory=list)
     affected_containers: List[str] = Field(default_factory=list)
 
 
-# ── POST /api/v1/documentos/generated ─────────────────────────────────────
-
 class GeneratedRequest(BaseModel):
-    """Solicitud para obtener contenedores con documentos ya generados."""
     deal_id: str = Field(..., description="ID del Deal en HubSpot")
     filtros: FiltrosDocumentos = Field(default_factory=FiltrosDocumentos)
 
@@ -108,15 +113,19 @@ class GeneratedResponse(BaseModel):
     total: int = 0
 
 
-# ── POST /api/v1/documentos/rollback ──────────────────────────────────────
-
 class RollbackRequest(BaseModel):
-    """Solicitud de rollback para un tipo de documento desde un contenedor ancla."""
-    container_id: str = Field(..., description="ID del contenedor seleccionado en la tabla")
-    doc_type: str = Field(..., description="Tipo de documento a borrar")
-    group_generation_id: Optional[str] = Field(
+    contenedor_nombre: str = Field(
+        ...,
+        min_length=1,
+        description="Nombre del contenedor seleccionado en la UI",
+    )
+    doc_type: Literal["origen_borrador", "origen", "sanitario"] = Field(
+        ...,
+        description="Tipo de documento a revertir",
+    )
+    group_id: Optional[str] = Field(
         None,
-        description="ID de grupo si la UI ya lo dispone (optimización)"
+        description="group_id del doc_type ya conocido por la UI",
     )
 
 
@@ -124,4 +133,15 @@ class RollbackResponse(BaseModel):
     success: bool
     error: Optional[str] = None
     affected_containers_count: int = 0
-    affected_container_ids: List[str] = Field(default_factory=list)
+    affected_container_names: List[str] = Field(
+        default_factory=list,
+        description="Muestra de nombres de contenedores afectados (máx 3)",
+    )
+    message: str = ""
+
+
+class DealContextResponse(BaseModel):
+    preprints_language: Optional[Literal["ES", "EN", "FR"]] = Field(
+        default=None,
+        description="Idioma configurado en el deal cotización padre (ES | EN | FR). null si el deal no tiene valor.",
+    )

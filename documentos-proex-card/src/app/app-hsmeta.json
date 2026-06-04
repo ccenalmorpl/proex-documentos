@@ -26,7 +26,8 @@
         "crm.objects.products.read",
         "crm.schemas.custom.write",
         "crm.objects.custom.write",
-        "hubdb"
+        "hubdb",
+        "files"
       ],
       "optionalScopes": [],
       "conditionallyRequiredScopes": []

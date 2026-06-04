@@ -1,8 +1,3 @@
-"""Router FastAPI para el módulo documentos.
-
-Routers sin lógica: solo validación de entrada y delegación al service.
-"""
-
 import logging
 from fastapi import APIRouter, HTTPException
 
@@ -11,6 +6,7 @@ from app.documentos.schemas import (
     GenerateRequest, GenerateResponse,
     GeneratedRequest, GeneratedResponse,
     RollbackRequest, RollbackResponse,
+    DealContextResponse,
 )
 from app.documentos import service
 
@@ -55,4 +51,14 @@ async def rollback_document(request: RollbackRequest) -> RollbackResponse:
         return await service.rollback_document(request)
     except Exception as e:
         logger.error(f"Error en /rollback: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/deal-context/{deal_id}", response_model=DealContextResponse)
+async def get_deal_context(deal_id: str) -> DealContextResponse:
+    """Devuelve datos del deal cotización padre para precarga inicial de la card (ej. preprints_language)."""
+    try:
+        return await service.get_deal_context(deal_id)
+    except Exception as e:
+        logger.error(f"Error en /deal-context: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

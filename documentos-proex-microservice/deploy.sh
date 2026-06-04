@@ -9,10 +9,13 @@
 # - Compatibilidad con todas las regiones AWS
 #
 # Variables de entorno requeridas en .env:
-#   PROEX_ACCESS_TOKEN          - HubSpot private app access token
-#   CORS_ORIGINS                - Orígenes CORS permitidos (CSV)
-#   SANITARIO_EMPRESA_DIRECCION - Texto fijo empresa+dirección para certificado sanitario
-#   FILES_FOLDER                - Carpeta destino en HubSpot File Manager
+#   PROEX_ACCESS_TOKEN           - HubSpot private app access token
+#   CORS_ORIGINS                 - Orígenes CORS permitidos (CSV)
+#   SANITARIO_EMPRESA_DIRECCION  - Texto fijo empresa+dirección para certificado sanitario
+#   SANITARIO_ESTABLECIMIENTO    - Establecimiento fijo del certificado sanitario
+#   SANITARIO_JEFE_SALUD         - Jefe de salud fijo del certificado sanitario
+#   SANITARIO_FIRMADO_EN         - Lugar de firma fijo del certificado sanitario
+#   FILES_FOLDER                 - Carpeta destino en HubSpot File Manager
 #   AWS_REGION, AWS_ACCOUNT_ID, ECR_REPO_NAME, FUNCTION_NAME
 
 set -e  # Exit on error
@@ -169,6 +172,9 @@ if ! aws lambda get-function --function-name ${FUNCTION_NAME} --region ${AWS_REG
       PROEX_ACCESS_TOKEN=${PROEX_ACCESS_TOKEN},
       CORS_ORIGINS=\"${CORS_ORIGINS}\",
       SANITARIO_EMPRESA_DIRECCION=\"${SANITARIO_EMPRESA_DIRECCION}\",
+      SANITARIO_ESTABLECIMIENTO=\"${SANITARIO_ESTABLECIMIENTO}\",
+      SANITARIO_JEFE_SALUD=\"${SANITARIO_JEFE_SALUD}\",
+      SANITARIO_FIRMADO_EN=\"${SANITARIO_FIRMADO_EN}\",
       FILES_FOLDER=${FILES_FOLDER}
     }"
 
@@ -212,6 +218,9 @@ else
       PROEX_ACCESS_TOKEN=${PROEX_ACCESS_TOKEN},
       CORS_ORIGINS=\"${CORS_ORIGINS}\",
       SANITARIO_EMPRESA_DIRECCION=\"${SANITARIO_EMPRESA_DIRECCION}\",
+      SANITARIO_ESTABLECIMIENTO=\"${SANITARIO_ESTABLECIMIENTO}\",
+      SANITARIO_JEFE_SALUD=\"${SANITARIO_JEFE_SALUD}\",
+      SANITARIO_FIRMADO_EN=\"${SANITARIO_FIRMADO_EN}\",
       FILES_FOLDER=${FILES_FOLDER}
     }" \
     --region ${AWS_REGION} \

@@ -1,5 +1,3 @@
-"""HubSpot API client — singleton centralizado para CRM, Files y HubDB."""
-
 import logging
 from functools import lru_cache
 from typing import Optional
@@ -11,8 +9,6 @@ logger = logging.getLogger(__name__)
 
 
 class HubSpotClient:
-    """Singleton client para todas las operaciones con HubSpot."""
-
     _instance: Optional['HubSpotClient'] = None
     _client: Optional[HubSpot] = None
 
@@ -50,5 +46,4 @@ def get_hubspot_client() -> HubSpotClient:
     return HubSpotClient()
 
 
-# Instancia global para uso directo
 hubspot_client = get_hubspot_client()

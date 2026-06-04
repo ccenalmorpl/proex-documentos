@@ -1,271 +1,1412 @@
-"""Lógica de negocio del módulo documentos.
-
-Cada función implementa uno de los 4 endpoints.
-Los TODO marcan los pasos que requieren implementación de HubSpot/PDF.
-"""
-
 import logging
-from typing import List
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import List, Optional, Tuple
+
+from app.shared.hubspot_batch import batch_read_associations, batch_read_objects
+
+from hubspot.crm.objects import (
+    PublicObjectSearchRequest,
+    Filter,
+    FilterGroup,
+    BatchInputSimplePublicObjectBatchInput,
+    SimplePublicObjectBatchInput,
+    BatchReadInputSimplePublicObjectId,
+    SimplePublicObjectId,
+)
 
 from app.documentos.schemas import (
     PendingRequest, PendingResponse, ContenedorListItem, DocInfo,
     GenerateRequest, GenerateResponse, GeneratedDocResult,
     GeneratedRequest, GeneratedResponse,
     RollbackRequest, RollbackResponse,
+    DealContextResponse,
 )
 from app.core.constants import (
     OBJECT_TYPE_CONTENEDOR,
+    OBJECT_TYPE_DEAL,
+    OBJECT_TYPE_COMPANY,
+    ASSOCIATION_TYPE_CONTENEDOR_TO_ELEMENTO,
     CONTENEDOR_DOC_PROPERTIES,
     CONTENEDOR_ALL_PROPERTIES,
+    CONTENEDOR_GENERATE_PROPERTIES,
+    CONTENEDOR_PROP_DOCUMENTOS_A_GENERAR,
+    CONTENEDOR_PROP_ETD,
+    CONTENEDOR_PROP_ETA,
     ALL_DOC_TYPES,
+    DOC_TYPE_ORIGEN_BORRADOR,
+    DOC_TYPE_ORIGEN_FINAL,
+    DOC_TYPE_SANITARIO,
+    DOC_TYPE_TO_HUBSPOT_FILTER,
+    DOC_TYPE_TO_FILE_PROPERTY,
+    ALL_CONTENEDOR_FILE_PROPERTY_NAMES,
+    ROLLBACK_API_TO_INTERNAL_DOC_TYPE,
+    DEAL_GENERATE_PROPERTIES,
+    DOC_TYPE_LABELS_ES,
 )
 from app.shared.hubspot_client import hubspot_client
-from app.shared.utils import generate_group_id, utcnow_iso
+from app.shared.files import (
+    delete_file,
+    fetch_file_metadata,
+    parse_file_ids,
+    serialize_file_ids,
+    upload_pdf,
+)
+from app.shared.properties import resolve_enum_label
+from app.shared.elementos import get_elementos_fabricante_por_contenedor
+
+from app.core.config import settings
+from app.documentos.domain.origen import build_origen_payload
+from app.documentos.domain.sanitario import build_sanitario_payload
+from app.documentos.pdf_renderer import render_origen_borrador_v2, render_origen_final_v2, render_sanitario_v2
 
 logger = logging.getLogger(__name__)
 
+def _build_doc_info_for_container(properties: dict, doc_type: str, required: bool) -> DocInfo:
+    """Construye DocInfo para un doc_type leyendo el estado desde las propiedades del contenedor."""
+    generated = _is_doc_generated(doc_type, properties)
+    file_prop = DOC_TYPE_TO_FILE_PROPERTY.get(doc_type)
+    raw_file = properties.get(file_prop) if file_prop else None
+    file_url = raw_file if raw_file else None
 
-# ── Helpers internos ────────────────────────────────────────────────────────
+    group_prop = CONTENEDOR_DOC_PROPERTIES.get(doc_type, {}).get("group_generation_id")
+    raw_group = properties.get(group_prop) if group_prop else None
+    group_id = raw_group if raw_group else None
 
-def _build_doc_info_for_container(properties: dict, doc_type: str) -> DocInfo:
-    """Extrae el DocInfo de un tipo de documento desde las propiedades de un Contenedor."""
-    props = CONTENEDOR_DOC_PROPERTIES[doc_type]
-    return DocInfo(
+    doc_info = DocInfo(
         doc_type=doc_type,
-        file_id=properties.get(props["file_id"]),
-        file_url=properties.get(props["file_url"]),
-        generated_at=properties.get(props["generated_at"]),
-        group_generation_id=properties.get(props["group_generation_id"]),
+        generated=generated,
+        required=required,
+        group_id=group_id,
+        file_url=file_url,
     )
+    logger.debug(
+        f"  [DocInfo] doc_type={doc_type} file_prop={file_prop!r} "
+        f"required={required} generated={generated} "
+        f"group_id={group_id!r} file_url={file_url!r}"
+    )
+    return doc_info
 
-
-def _is_pending(properties: dict, doc_type: str) -> bool:
-    """Devuelve True si el doc_type NO está generado en este contenedor."""
-    props = CONTENEDOR_DOC_PROPERTIES[doc_type]
-    return not properties.get(props["file_url"])
-
-
-def _is_generated(properties: dict, doc_type: str) -> bool:
-    """Devuelve True si el doc_type SÍ está generado en este contenedor."""
-    return not _is_pending(properties, doc_type)
-
-
-def _map_to_list_item(obj_id: str, properties: dict, doc_types: list) -> ContenedorListItem:
+def _map_to_list_item(
+    obj_id: str,
+    properties: dict,
+    nombre_cliente: Optional[str] = None,
+    deal_id: Optional[str] = None,
+    deal_name: Optional[str] = None,
+    deal_properties: Optional[dict] = None,
+    parsed_documentos_a_generar: Optional[List[str]] = None,
+) -> ContenedorListItem:
     """Convierte un objeto Contenedor de HubSpot en ContenedorListItem."""
-    return ContenedorListItem(
-        id=obj_id,
-        name=properties.get("name", ""),
-        nombre_cliente=properties.get("nombre_cliente"),
-        fecha_carga=properties.get("fecha_carga"),
-        fecha_cotizacion=properties.get("fecha_cotizacion"),
-        docs=[_build_doc_info_for_container(properties, dt) for dt in doc_types],
-    )
+    if parsed_documentos_a_generar is None:
+        parsed_documentos_a_generar = _parse_documentos_a_generar(obj_id, properties)
 
+    docs = [
+        _build_doc_info_for_container(
+            properties, dt,
+            required=_is_doc_type_required(dt, parsed_documentos_a_generar),
+        )
+        for dt in ALL_DOC_TYPES
+    ]
+    item = ContenedorListItem(
+        id=obj_id,
+        name=properties.get("nombre", ""),
+        nombre_cliente=nombre_cliente,
+        etd=properties.get(CONTENEDOR_PROP_ETD),
+        eta=properties.get(CONTENEDOR_PROP_ETA),
+        deal_id=deal_id or None,
+        deal_name=deal_name or None,
+        deal_properties=deal_properties or None,
+        docs=docs,
+    )
+    logger.debug(
+        f"  [MapItem] id={obj_id} name={item.name!r} "
+        f"nombre_cliente={item.nombre_cliente!r} "
+        f"deal_id={item.deal_id!r} deal_name={item.deal_name!r} "
+        f"etd={item.etd!r} eta={item.eta!r} "
+        f"docs={[{'doc_type': d.doc_type, 'required': d.required, 'generated': d.generated} for d in item.docs]}"
+    )
+    return item
+
+def _get_deal_info_for_containers(
+    client,
+    container_ids: List[str],
+) -> dict:
+    """Obtiene (deal_id, deal_name, deal_properties) para cada contenedor. Fallo silencioso por contenedor: si no tiene Deal asociado devuelve ("", "", {})."""
+    if not container_ids:
+        return {}
+
+    t = time.monotonic()
+    contenedor_to_deals = batch_read_associations(
+        client, OBJECT_TYPE_CONTENEDOR, OBJECT_TYPE_DEAL, container_ids,
+    )
+    logger.info(f"[TIMER] _get_deal_info.batch_assoc: {time.monotonic() - t:.2f}s")
+
+    container_deal_id: dict = {
+        cid: (deals[0] if deals else "")
+        for cid, deals in contenedor_to_deals.items()
+    }
+
+    unique_deal_ids = [did for did in set(container_deal_id.values()) if did]
+    t = time.monotonic()
+    deal_data_by_id = batch_read_objects(
+        client,
+        OBJECT_TYPE_DEAL,
+        unique_deal_ids,
+        ["dealname", "certificado_origen_mercancia", "observaciones", "preprints_language"],
+    )
+    logger.info(f"[TIMER] _get_deal_info.batch_deals: {time.monotonic() - t:.2f}s")
+
+    return {
+        cid: (
+            container_deal_id.get(cid, ""),
+            (deal_data_by_id.get(container_deal_id.get(cid, "")) or {}).get("dealname", "") or "",
+            {
+                "certificado_origen_mercancia": (deal_data_by_id.get(container_deal_id.get(cid, "")) or {}).get(
+                    "certificado_origen_mercancia", "",
+                ) or "",
+                "observaciones": (deal_data_by_id.get(container_deal_id.get(cid, "")) or {}).get(
+                    "observaciones", "",
+                ) or "",
+                "preprints_language": (deal_data_by_id.get(container_deal_id.get(cid, "")) or {}).get(
+                    "preprints_language", "",
+                ) or "",
+            },
+        )
+        for cid in container_ids
+    }
 
 def _clear_doc_properties(doc_type: str) -> dict:
     """Devuelve un dict de propiedades con valores vacíos para limpiar un tipo de doc."""
     props = CONTENEDOR_DOC_PROPERTIES[doc_type]
     return {v: "" for v in props.values()}
 
+def _search_contenedor_by_nombre(client, nombre: str, props: List[str]) -> dict:
+    """Busca Contenedor(es) por la propiedad 'nombre' (EQ). Limit=5 para detectar duplicados."""
+    filters = [Filter(property_name="nombre", operator="EQ", value=nombre)]
+    search_request = PublicObjectSearchRequest(
+        filter_groups=[FilterGroup(filters=filters)],
+        properties=props,
+        limit=5,
+    )
+    resp = client.crm.objects.search_api.do_search(
+        object_type=OBJECT_TYPE_CONTENEDOR,
+        public_object_search_request=search_request,
+    )
+    return {obj.id: obj.properties for obj in (resp.results or [])}
 
-# ── Endpoints ───────────────────────────────────────────────────────────────
+def _search_contenedores_by_group_prop(
+    client, group_prop_name: str, group_id_value: str, props: List[str]
+) -> dict:
+    """Busca todos los Contenedores cuyo group_prop == group_id_value (paginado)."""
+    result: dict = {}
+    after: Optional[str] = None
+    page_num = 0
+
+    while True:
+        page_num += 1
+        filters = [Filter(property_name=group_prop_name, operator="EQ", value=group_id_value)]
+        search_request = PublicObjectSearchRequest(
+            filter_groups=[FilterGroup(filters=filters)],
+            properties=props,
+            limit=100,
+            after=after,
+        )
+        logger.info(
+            f"  [ROLLBACK][search_group] página={page_num} "
+            f"group_prop={group_prop_name!r} group_id={group_id_value!r}"
+        )
+        resp = client.crm.objects.search_api.do_search(
+            object_type=OBJECT_TYPE_CONTENEDOR,
+            public_object_search_request=search_request,
+        )
+        for obj in (resp.results or []):
+            result[obj.id] = obj.properties
+        logger.info(
+            f"  [ROLLBACK][search_group] página={page_num} → "
+            f"{len(resp.results or [])} resultados (acumulado={len(result)})"
+        )
+        if resp.paging and resp.paging.next:
+            after = resp.paging.next.after
+        else:
+            break
+
+    return result
+
+def _read_contenedor_file_prop(client, container_id: str, prop: str) -> str:
+    try:
+        obj = client.crm.objects.basic_api.get_by_id(
+            object_type=OBJECT_TYPE_CONTENEDOR,
+            object_id=container_id,
+            properties=[prop],
+        )
+        return (obj.properties or {}).get(prop) or ""
+    except Exception as e:
+        logger.warning(f"[READ_FILE_PROP] cid={container_id!r} prop={prop!r} fallo: {e}")
+        return ""
+
+
+def _merge_file_in_prop(client, sample_container_id: str, prop: str, prefix: str, new_file_id: str) -> str:
+    """Lee la prop del contenedor sample, elimina archivos del mismo prefix (y los borra del File Manager), añade el nuevo, devuelve el valor serializado para escribir."""
+    current_raw = _read_contenedor_file_prop(client, sample_container_id, prop)
+    current_ids = parse_file_ids(current_raw)
+    kept_ids: List[str] = []
+    for fid in current_ids:
+        if fid == new_file_id:
+            continue
+        meta = fetch_file_metadata(fid)
+        if meta and meta.name.startswith(prefix):
+            try:
+                delete_file(fid)
+            except Exception as e:
+                logger.warning(f"[MERGE_FILE_PROP] delete_file falló para {fid!r}: {e}")
+        else:
+            kept_ids.append(fid)
+    kept_ids.append(new_file_id)
+    return serialize_file_ids(kept_ids)
+
+
+def _batch_update_contenedores(client, container_ids: List[str], properties: dict) -> dict:
+    """Actualiza propiedades en batch sobre Contenedores (chunks de 100). Un fallo en un chunk no aborta los demás."""
+    updated = 0
+    failed: List[str] = []
+    chunk_size = 100
+
+    for i in range(0, len(container_ids), chunk_size):
+        chunk = container_ids[i : i + chunk_size]
+        batch_input = BatchInputSimplePublicObjectBatchInput(
+            inputs=[
+                SimplePublicObjectBatchInput(id=cid, properties=properties)
+                for cid in chunk
+            ]
+        )
+        try:
+            resp = client.crm.objects.batch_api.update(
+                object_type=OBJECT_TYPE_CONTENEDOR,
+                batch_input_simple_public_object_batch_input=batch_input,
+            )
+            chunk_updated = len(resp.results or [])
+            updated += chunk_updated
+            logger.debug(
+                f"  [ROLLBACK][batch_update] chunk {i // chunk_size + 1}: "
+                f"solicitados={len(chunk)} actualizados={chunk_updated}"
+            )
+        except Exception as e:
+            logger.error(
+                f"  [ROLLBACK][batch_update] ERROR chunk {i // chunk_size + 1}: {e}",
+                exc_info=True,
+            )
+            failed.extend(chunk)
+
+    return {"updated": updated, "failed": failed, "total_requested": len(container_ids)}
+
+def _date_str_to_ms(date_str: str) -> int:
+    """Convierte YYYY-MM-DD a milisegundos epoch UTC."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    ms = int(dt.timestamp() * 1000)
+    logger.debug(f"  [DateConv] {date_str!r} → {ms} ms")
+    return ms
+
+def _build_search_filters(filtros) -> List[Filter]:
+    """Construye la lista de Filter objects para la HubSpot Search API."""
+    filters: List[Filter] = []
+
+    if filtros.empresa:
+        filters.append(Filter(
+            property_name="nombre_cliente",
+            operator="CONTAINS_TOKEN",
+            value=filtros.empresa,
+        ))
+        logger.info(f"  [Filter] empresa CONTAINS_TOKEN={filtros.empresa!r}")
+
+    if filtros.etd_desde:
+        ms = _date_str_to_ms(filtros.etd_desde)
+        filters.append(Filter(property_name=CONTENEDOR_PROP_ETD, operator="GTE", value=str(ms)))
+        logger.info(f"  [Filter] etd GTE {filtros.etd_desde!r} ({ms}ms)")
+    if filtros.etd_hasta:
+        ms = _date_str_to_ms(filtros.etd_hasta)
+        filters.append(Filter(property_name=CONTENEDOR_PROP_ETD, operator="LTE", value=str(ms)))
+        logger.info(f"  [Filter] etd LTE {filtros.etd_hasta!r} ({ms}ms)")
+
+    if filtros.eta_desde:
+        ms = _date_str_to_ms(filtros.eta_desde)
+        filters.append(Filter(property_name=CONTENEDOR_PROP_ETA, operator="GTE", value=str(ms)))
+        logger.info(f"  [Filter] eta GTE {filtros.eta_desde!r} ({ms}ms)")
+    if filtros.eta_hasta:
+        ms = _date_str_to_ms(filtros.eta_hasta)
+        filters.append(Filter(property_name=CONTENEDOR_PROP_ETA, operator="LTE", value=str(ms)))
+        logger.info(f"  [Filter] eta LTE {filtros.eta_hasta!r} ({ms}ms)")
+
+    logger.info(f"  [Filters] total={len(filters)} filtros construidos")
+    return filters
+
+def _search_contenedores(client, filters: List[Filter]) -> dict:
+    """Ejecuta la búsqueda en HubSpot con paginación completa."""
+    result: dict = {}
+    after: Optional[str] = None
+    page_num = 0
+
+    while True:
+        page_num += 1
+
+        filter_groups = [FilterGroup(filters=filters)] if filters else []
+        search_request = PublicObjectSearchRequest(
+            filter_groups=filter_groups,
+            properties=CONTENEDOR_ALL_PROPERTIES,
+            limit=100,
+            after=after,
+        )
+
+        logger.info(
+            f"  [Search] página={page_num} after={after!r} "
+            f"object_type={OBJECT_TYPE_CONTENEDOR} "
+            f"filter_groups={len(filter_groups)} "
+            f"properties_count={len(CONTENEDOR_ALL_PROPERTIES)}"
+        )
+        logger.debug(f"  [Search] filter_groups={filter_groups} properties={CONTENEDOR_ALL_PROPERTIES}")
+
+        resp = client.crm.objects.search_api.do_search(
+            object_type=OBJECT_TYPE_CONTENEDOR,
+            public_object_search_request=search_request,
+        )
+
+        page_results = resp.results or []
+        logger.info(
+            f"  [Search] página={page_num} → {len(page_results)} resultados "
+            f"(total acumulado: {len(result) + len(page_results)})"
+        )
+
+        for obj in page_results:
+            logger.debug(f"    [Obj] id={obj.id} props={list(obj.properties.keys())}")
+            result[obj.id] = obj.properties
+
+        if resp.paging and resp.paging.next:
+            after = resp.paging.next.after
+            logger.info(f"  [Search] hay más páginas, continuando con after={after!r}")
+        else:
+            logger.info(f"  [Search] paginación completa. Total={len(result)} contenedores.")
+            break
+
+    return result
+
+def _search_companies_by_name(client, empresa: str) -> List[tuple]:
+    """Busca empresas cuyo nombre contenga 'empresa'. Devuelve lista de (company_id, company_name)."""
+    from app.empresas.service import _search_companies_by_name as _search
+
+    results = _search(client, empresa)
+    logger.info(
+        f"  [search_companies] empresa={empresa!r} → "
+        f"{len(results)} encontradas | sample={results[:3]}"
+    )
+    return results
+
+def _get_contenedores_for_companies(client, company_ids: List[str]) -> dict:
+    """Devuelve {contenedor_id: company_id} para todas las empresas dadas. Si un contenedor está asociado a varias empresas, prevalece la última vista."""
+    contenedor_to_company: dict = {}
+
+    for company_id in company_ids:
+        after = None
+        page = 0
+        while True:
+            page += 1
+            kwargs: dict = {
+                "object_type": OBJECT_TYPE_COMPANY,
+                "object_id": company_id,
+                "to_object_type": OBJECT_TYPE_CONTENEDOR,
+                "limit": 100,
+            }
+            if after:
+                kwargs["after"] = after
+
+            try:
+                resp = client.crm.associations.v4.basic_api.get_page(**kwargs)
+            except Exception as e:
+                logger.warning(
+                    f"  [assoc] error empresa={company_id} "
+                    f"página={page}: {e}"
+                )
+                break
+
+            page_ids = {assoc.to_object_id for assoc in (resp.results or [])}
+            for cid in page_ids:
+                contenedor_to_company[cid] = company_id
+            logger.debug(
+                f"  [assoc] empresa={company_id} página={page} "
+                f"+{len(page_ids)} contenedores (acumulado={len(contenedor_to_company)})"
+            )
+
+            if resp.paging and resp.paging.next:
+                after = resp.paging.next.after
+            else:
+                break
+
+    return contenedor_to_company
+
+def _batch_read_contenedores(client, contenedor_ids: List[str]) -> dict:
+    """Lee propiedades de contenedores en batch (máx 100 por llamada)."""
+    props_to_read = CONTENEDOR_ALL_PROPERTIES + [CONTENEDOR_PROP_DOCUMENTOS_A_GENERAR] + ALL_CONTENEDOR_FILE_PROPERTY_NAMES
+    result: dict = {}
+    chunk_size = 100
+
+    for i in range(0, len(contenedor_ids), chunk_size):
+        chunk = contenedor_ids[i:i + chunk_size]
+        batch_input = BatchReadInputSimplePublicObjectId(
+            properties=props_to_read,
+            inputs=[SimplePublicObjectId(id=cid) for cid in chunk],
+        )
+        resp = client.crm.objects.batch_api.read(
+            object_type=OBJECT_TYPE_CONTENEDOR,
+            batch_read_input_simple_public_object_id=batch_input,
+        )
+        for obj in (resp.results or []):
+            result[obj.id] = obj.properties
+
+        logger.debug(
+            f"  [batch_read] chunk {i // chunk_size + 1}: "
+            f"solicitados={len(chunk)} devueltos={len(resp.results or [])}"
+        )
+
+    logger.info(
+        f"  [batch_read] total leídos con propiedades: {len(result)}"
+    )
+    return result
+
+def _parse_documentos_a_generar(cid: str, properties: dict) -> Optional[List[str]]:
+    """Parsea la propiedad multi-select documentos_a_generar. HubSpot puede devolverla como string ';' o como lista."""
+    raw = properties.get(CONTENEDOR_PROP_DOCUMENTOS_A_GENERAR)
+    if not raw:
+        logger.warning(
+            f"  [parse] id={cid} NO tiene '{CONTENEDOR_PROP_DOCUMENTOS_A_GENERAR}' "
+            f"o está vacío → descartado"
+        )
+        return None
+
+    if isinstance(raw, list):
+        parsed = [t.strip() for t in raw if t.strip()]
+    else:
+        parsed = [t.strip() for t in str(raw).split(";") if t.strip()]
+
+    if not parsed:
+        logger.warning(
+            f"  [parse] id={cid} raw={raw!r} → vacío tras parse → descartado"
+        )
+        return None
+
+    logger.debug(f"  [parse] id={cid} raw={raw!r} → {parsed}")
+    return parsed
+
+def _is_doc_type_required(doc_type: str, parsed_documentos: Optional[List[str]]) -> bool:
+    """Determina si un doc_type es requerido según documentos_a_generar parseado."""
+    if not parsed_documentos:
+        return False
+    hs_value = DOC_TYPE_TO_HUBSPOT_FILTER.get(doc_type)
+    return hs_value is not None and hs_value in parsed_documentos
+
+def _is_doc_generated(doc_type: str, properties: dict) -> bool:
+    """True si la propiedad archivo del doc_type tiene valor. No usa group_generation_id."""
+    file_prop = DOC_TYPE_TO_FILE_PROPERTY.get(doc_type)
+    if not file_prop:
+        return False
+    return bool(properties.get(file_prop))
+
+def _filter_by_date(
+    contenedores: dict,
+    prop_name: str,
+    desde: Optional[str],
+    hasta: Optional[str],
+) -> tuple:
+    """Filtra en memoria por rango de fecha sobre una propiedad del contenedor. Si no hay valor, se incluye."""
+    if not desde and not hasta:
+        return contenedores, 0
+
+    filtered: dict = {}
+    discarded = 0
+
+    for cid, props in contenedores.items():
+        raw = props.get(prop_name)
+        if not raw:
+            filtered[cid] = props
+            continue
+
+        date_str = str(raw).strip()[:10]
+
+        if desde and date_str < desde:
+            discarded += 1
+            logger.debug(
+                f"  [DateFilter] id={cid} {prop_name}={date_str} "
+                f"< desde={desde} → descartado"
+            )
+            continue
+        if hasta and date_str > hasta:
+            discarded += 1
+            logger.debug(
+                f"  [DateFilter] id={cid} {prop_name}={date_str} "
+                f"> hasta={hasta} → descartado"
+            )
+            continue
+
+        filtered[cid] = props
+
+    return filtered, discarded
+
+def _filter_by_generated_docs(contenedores: dict, tipos: List[str]) -> tuple:
+    """Mantiene solo contenedores que tienen al menos un doc generado en los tipos dados."""
+    filtered: dict = {}
+    discarded = 0
+
+    for cid, props in contenedores.items():
+        tiene_alguno = False
+        for tipo in tipos:
+            file_prop = DOC_TYPE_TO_FILE_PROPERTY.get(tipo)
+            if not file_prop:
+                continue
+            if props.get(file_prop):
+                tiene_alguno = True
+                break
+
+        if tiene_alguno:
+            filtered[cid] = props
+            logger.debug(
+                f"  [generated] id={cid} → INCLUIDO (al menos un doc generado)"
+            )
+        else:
+            discarded += 1
+            logger.debug(
+                f"  [generated] id={cid} → DESCARTADO (ningún doc generado)"
+            )
+
+    return filtered, discarded
 
 async def get_pending_containers(request: PendingRequest) -> PendingResponse:
-    """Devuelve contenedores asociados al Deal que tienen docs pendientes según filtros.
-
-    Pasos:
-    1. Obtener IDs de contenedores asociados al deal_id.
-    2. Leer propiedades de cada contenedor (CONTENEDOR_ALL_PROPERTIES).
-    3. Aplicar filtros (empresa, fechas).
-    4. Para cada contenedor, determinar qué tipos están pendientes
-       (según request.filtros.tipos_documento o todos si no se especifica).
-    5. Devolver solo los que tienen al menos 1 tipo pendiente.
-    """
-    client = hubspot_client.get_client()
+    """Devuelve contenedores con documentos pendientes según los filtros del request."""
     filtros = request.filtros
-    tipos = filtros.tipos_documento or ALL_DOC_TYPES
+    empresa = (filtros.empresa or "").strip()
+    tipos = filtros.tipos_documento or []
+
+    if not empresa:
+        logger.warning("[pending_containers] empresa requerida pero vacía")
+        return PendingResponse(
+            success=False,
+            error="El filtro 'empresa' es obligatorio.",
+        )
+
+    if not tipos:
+        logger.warning("[pending_containers] tipos_documento requerido pero vacío")
+        return PendingResponse(
+            success=False,
+            error="El filtro 'tipos_documento' es obligatorio.",
+        )
+
+    if (filtros.etd_desde and filtros.etd_hasta
+            and filtros.etd_desde > filtros.etd_hasta):
+        return PendingResponse(
+            success=False,
+            error="etd_desde no puede ser mayor que etd_hasta.",
+        )
+
+    if (filtros.eta_desde and filtros.eta_hasta
+            and filtros.eta_desde > filtros.eta_hasta):
+        return PendingResponse(
+            success=False,
+            error="eta_desde no puede ser mayor que eta_hasta.",
+        )
+
+    logger.info(
+        f"[pending_containers] filtros normalizados: "
+        f"empresa={empresa!r} tipos={tipos} "
+        f"etd=[{filtros.etd_desde}, {filtros.etd_hasta}] "
+        f"eta=[{filtros.eta_desde}, {filtros.eta_hasta}]"
+    )
 
     try:
-        # TODO: Paso 1 — obtener contenedores asociados al deal
-        # Usar Associations API v4:
-        # client.crm.associations.v4.basic_api.get_page(
-        #     object_type="deals",
-        #     object_id=request.deal_id,
-        #     to_object_type=OBJECT_TYPE_CONTENEDOR,
-        # )
-        # container_ids = [r.to_object_id for r in response.results]
+        client = hubspot_client.get_client()
 
-        # TODO: Paso 2 — leer propiedades de los contenedores
-        # client.crm.objects.batch_api.read(
-        #     batch_read_input_simple_public_object_id={
-        #         "inputs": [{"id": cid} for cid in container_ids],
-        #         "properties": CONTENEDOR_ALL_PROPERTIES,
-        #     },
-        #     object_type=OBJECT_TYPE_CONTENEDOR,
-        # )
+        companies = _search_companies_by_name(client, empresa)
+        company_ids = [cid for cid, _ in companies]
+        company_name_by_id = {cid: cname for cid, cname in companies}
 
-        # TODO: Paso 3 y 4 — filtrar y mapear
-        # Aplicar filtros de empresa y fechas sobre las propiedades.
-        # Conservar solo contenedores donde _is_pending(props, tipo) == True para ≥1 tipo.
+        logger.info(
+            f"[pending_containers]{len(company_ids)} empresa(s) "
+            f"→ sample={companies[:3]}"
+        )
 
-        # TODO: Paso 5 — devolver lista
-        contenedores: List[ContenedorListItem] = []
-        return PendingResponse(success=True, contenedores=contenedores, total=len(contenedores))
+        if not company_ids:
+            logger.info(
+                f"[pending_containers] sin empresas con nombre que contenga "
+                f"{empresa!r} → respuesta vacía"
+            )
+            return PendingResponse(success=True, contenedores=[], total=0)
 
-    except Exception as e:
-        logger.error(f"get_pending_containers error: {e}", exc_info=True)
-        return PendingResponse(success=False, error=str(e))
+        contenedor_to_company = _get_contenedores_for_companies(client, company_ids)
+        contenedor_ids_set = set(contenedor_to_company.keys())
 
+        contenedor_company_name = {
+            cid: company_name_by_id.get(co_id, "")
+            for cid, co_id in contenedor_to_company.items()
+        }
 
-async def generate_documents(request: GenerateRequest) -> GenerateResponse:
-    """Genera PDFs para los tipos solicitados y los persiste en los contenedores.
+        logger.info(
+            f"[pending_containers]{len(contenedor_ids_set)} contenedor(es) "
+            f"pre-filtros → sample={list(contenedor_ids_set)[:3]}"
+        )
 
-    Pasos:
-    1. Validar que los container_ids existen y están asociados al deal.
-    2. Crear group_generation_id único.
-    3. Para cada doc_type en request.doc_types:
-       a. Recopilar datos necesarios (artículos, empresa, consignee, puertos, etc.).
-       b. Generar PDF con la plantilla correspondiente.
-       c. Subir PDF a HubSpot File Manager (shared/files.py).
-       d. Persistir file_id, file_url, group_generation_id, generated_at
-          en TODOS los contenedores del grupo.
-    4. Devolver resumen de generación.
-    """
-    client = hubspot_client.get_client()
-    group_id = generate_group_id()
-    generated_docs: List[GeneratedDocResult] = []
+        if not contenedor_ids_set:
+            logger.info(
+                "[pending_containers] ninguna empresa tiene contenedores "
+                "asociados → respuesta vacía"
+            )
+            return PendingResponse(success=True, contenedores=[], total=0)
 
-    try:
-        # TODO: Paso 1 — validar contenedores
-        # Leer batch de contenedores y verificar asociación con deal_id.
+        contenedores_data = _batch_read_contenedores(
+            client, list(contenedor_ids_set)
+        )
+        logger.info(
+            f"[pending_containers]{len(contenedores_data)} contenedores "
+            f"leídos con propiedades"
+        )
 
-        for doc_type in request.doc_types:
-            # TODO: Paso 3a — recopilar datos para la plantilla
-            # Los datos varían por tipo:
-            # - origen_borrador / origen_final: artículos, sumatorios, totales
-            # - sanitario: artículos únicos, cajas globales, peso neto global,
-            #              país destino (HubDB), consignee, numero_contenedor,
-            #              fecha primera factura, empresa+dirección (config)
+        for cid, props in contenedores_data.items():
+            file_vals = " ".join(
+                f"{p}={props.get(p)!r}" for p in sorted(ALL_CONTENEDOR_FILE_PROPERTY_NAMES)
+            )
+            logger.info(
+                f"[pending_containers][prefiltro] "
+                f"id={cid} "
+                f"name={props.get('nombre')!r} "
+                f"etd={props.get(CONTENEDOR_PROP_ETD)!r} "
+                f"eta={props.get(CONTENEDOR_PROP_ETA)!r} "
+                f"documentos_a_generar={props.get(CONTENEDOR_PROP_DOCUMENTOS_A_GENERAR)!r} "
+                f"{file_vals}"
+            )
 
-            # TODO: Paso 3b — generar PDF
-            # from app.documentos.templates import render_origen, render_sanitario
-            # pdf_bytes = render_origen(data, draft=(doc_type == "origen_borrador"))
-            # o pdf_bytes = render_sanitario(data)
+        mapped_tipos = list({DOC_TYPE_TO_HUBSPOT_FILTER.get(t, t) for t in tipos})
+        logger.info(
+            f"[pending_containers] tipos_solicitados={tipos} "
+            f"→ hubspot_filter_values={mapped_tipos}"
+        )
 
-            # TODO: Paso 3c — subir a File Manager
-            # from app.shared.files import upload_pdf
-            # filename = f"{doc_type}_{group_id[:8]}.pdf"
-            # upload_result = upload_pdf(pdf_bytes, filename)
+        filtered: dict = {}
+        parsed_docs_by_cid: dict = {}
+        discarded_step4 = 0
+        sample_logged = 0
 
-            # TODO: Paso 3d — persistir en cada contenedor del grupo
-            # props_to_update = {
-            #     CONTENEDOR_DOC_PROPERTIES[doc_type]["group_generation_id"]: group_id,
-            #     CONTENEDOR_DOC_PROPERTIES[doc_type]["file_id"]: upload_result.file_id,
-            #     CONTENEDOR_DOC_PROPERTIES[doc_type]["file_url"]: upload_result.file_url,
-            #     CONTENEDOR_DOC_PROPERTIES[doc_type]["generated_at"]: utcnow_iso(),
-            # }
-            # client.crm.objects.batch_api.update(
-            #     batch_input_simple_public_object_batch_input={
-            #         "inputs": [{"id": cid, "properties": props_to_update}
-            #                    for cid in request.container_ids]
-            #     },
-            #     object_type=OBJECT_TYPE_CONTENEDOR,
-            # )
+        for cid, props in contenedores_data.items():
+            parsed_tipos = _parse_documentos_a_generar(cid, props)
 
-            pass  # Eliminar cuando esté implementado
+            has_required_pending = False
+            for t in tipos:
+                if _is_doc_type_required(t, parsed_tipos) and not _is_doc_generated(t, props):
+                    has_required_pending = True
+                    break
 
-        return GenerateResponse(
+            if sample_logged < 3:
+                logger.info(
+                    f"[pending_containers][sample] id={cid} "
+                    f"documentos_a_generar_parsed={parsed_tipos} "
+                    f"has_required_pending={has_required_pending}"
+                )
+                sample_logged += 1
+
+            if has_required_pending:
+                filtered[cid] = props
+                parsed_docs_by_cid[cid] = parsed_tipos
+            else:
+                discarded_step4 += 1
+
+        logger.info(
+            f"[pending_containers] post-filtro: {len(filtered)} "
+            f"({discarded_step4} descartados)"
+        )
+
+        if not filtered:
+            return PendingResponse(success=True, contenedores=[], total=0)
+
+        filtered, descartados_5 = _filter_by_date(
+            filtered,
+            CONTENEDOR_PROP_ETD,
+            filtros.etd_desde,
+            filtros.etd_hasta,
+        )
+        logger.info(
+            f"[pending_containers] post-etd: {len(filtered)} "
+            f"({descartados_5} descartados)"
+        )
+
+        filtered, descartados_6 = _filter_by_date(
+            filtered,
+            CONTENEDOR_PROP_ETA,
+            filtros.eta_desde,
+            filtros.eta_hasta,
+        )
+        logger.info(
+            f"[pending_containers] post-eta: {len(filtered)} "
+            f"({descartados_6} descartados)"
+        )
+
+        deal_info = _get_deal_info_for_containers(client, list(filtered.keys()))
+        contenedores: List[ContenedorListItem] = [
+            _map_to_list_item(
+                cid, props,
+                nombre_cliente=contenedor_company_name.get(cid),
+                deal_id=deal_info.get(cid, ("", "", {}))[0] or None,
+                deal_name=deal_info.get(cid, ("", "", {}))[1] or None,
+                deal_properties=deal_info.get(cid, ("", "", {}))[2] or None,
+                parsed_documentos_a_generar=parsed_docs_by_cid.get(cid),
+            )
+            for cid, props in filtered.items()
+        ]
+
+        logger.info(
+            f"[pending_containers] total_final={len(contenedores)}"
+        )
+        return PendingResponse(
             success=True,
-            group_generation_id=group_id,
-            generated_docs=generated_docs,
-            affected_containers=request.container_ids,
+            contenedores=contenedores,
+            total=len(contenedores),
         )
 
     except Exception as e:
-        logger.error(f"generate_documents error: {e}", exc_info=True)
-        return GenerateResponse(success=False, error=str(e))
+        logger.error(f"[pending_containers] ERROR inesperado: {e}", exc_info=True)
+        return PendingResponse(success=False, error=str(e))
 
+def _get_contenedores_for_generate(client, container_ids: List[str]) -> dict:
+    """Batch read de contenedores para generación de PDFs, preservando el orden de container_ids. Lanza ValueError si algún ID no existe."""
+    logger.info(
+        f"solicitados={len(container_ids)} ids={container_ids}"
+    )
 
-async def get_generated_containers(request: GeneratedRequest) -> GeneratedResponse:
-    """Devuelve contenedores que tienen al menos un tipo de doc generado (Tab 2).
+    raw: dict = {}
+    chunk_size = 100
+    for i in range(0, len(container_ids), chunk_size):
+        chunk = container_ids[i : i + chunk_size]
+        batch_input = BatchReadInputSimplePublicObjectId(
+            properties=CONTENEDOR_GENERATE_PROPERTIES,
+            inputs=[SimplePublicObjectId(id=cid) for cid in chunk],
+        )
+        resp = client.crm.objects.batch_api.read(
+            object_type=OBJECT_TYPE_CONTENEDOR,
+            batch_read_input_simple_public_object_id=batch_input,
+        )
+        for obj in (resp.results or []):
+            raw[obj.id] = obj.properties
 
-    Mismo flujo que get_pending_containers pero con _is_generated en lugar de _is_pending.
-    """
+    missing = [cid for cid in container_ids if cid not in raw]
+    if missing:
+        raise ValueError(
+            f"contenedores no encontrados en HubSpot: {missing}"
+        )
+
+    ordered = {cid: raw[cid] for cid in container_ids}
+    logger.info(f"OK → {len(ordered)} contenedores leídos")
+    return ordered
+
+def _get_deal_for_contenedores(client, container_ids: List[str]) -> tuple:
+    """Obtiene el Deal asociado a los contenedores. Lanza ValueError si algún contenedor no tiene Deal."""
+    logger.info(f"resolviendo deal para {len(container_ids)} contenedores")
+
+    t = time.monotonic()
+    contenedor_to_deals = batch_read_associations(
+        client, OBJECT_TYPE_CONTENEDOR, OBJECT_TYPE_DEAL, container_ids,
+    )
+    logger.info(f"[TIMER] _get_deal_for_contenedores.batch_assoc: {time.monotonic() - t:.2f}s")
+
+    sin_deal: List[str] = [cid for cid in container_ids if not contenedor_to_deals.get(cid)]
+    if sin_deal:
+        raise ValueError(f"contenedores sin Deal asociado: {sin_deal}")
+
+    deal_id_per_container = {
+        cid: contenedor_to_deals[cid][0] for cid in container_ids
+    }
+    unique_deals = set(deal_id_per_container.values())
+    if len(unique_deals) != 1:
+        logger.warning(
+            f"contenedores pertenecen a {len(unique_deals)} "
+            f"deals distintos: {unique_deals}. Usando el primero para consignee/puerto_destino."
+        )
+
+    deal_id = next(iter(unique_deals))
+    logger.info(f"deal_id={deal_id!r} — leyendo propiedades")
+
+    t = time.monotonic()
+    deals_by_id = batch_read_objects(
+        client, OBJECT_TYPE_DEAL, [deal_id], list(DEAL_GENERATE_PROPERTIES),
+    )
+    deal_props = deals_by_id.get(deal_id) or {}
+    logger.info(
+        f"[TIMER] _get_deal_for_contenedores.batch_read_deal: {time.monotonic() - t:.2f}s "
+        f"consignee={'presente' if deal_props.get('consignee') else 'ausente'}"
+    )
+    return deal_id, deal_props
+
+async def generate_documents(request: GenerateRequest) -> GenerateResponse:
+    """Genera 1–3 documentos para un grupo de contenedores. Todos los contenedores deben pertenecer al mismo Deal."""
+    logger.info(
+        f"container_ids={request.container_ids} doc_types={request.doc_types}"
+    )
+
     client = hubspot_client.get_client()
-    filtros = request.filtros
-    tipos = filtros.tipos_documento or ALL_DOC_TYPES
 
     try:
-        # TODO: Mismo patrón que get_pending_containers pero filtrando _is_generated.
-        # Ver comentarios en get_pending_containers para los pasos.
+        containers = _get_contenedores_for_generate(client, request.container_ids)
 
-        contenedores: List[ContenedorListItem] = []
-        return GeneratedResponse(success=True, contenedores=contenedores, total=len(contenedores))
+        for cid, props in containers.items():
+            parsed_docs = _parse_documentos_a_generar(cid, props)
+            nombre = props.get("nombre", cid)
+            for dt in request.doc_types:
+                if not _is_doc_type_required(dt, parsed_docs):
+                    label = DOC_TYPE_LABELS_ES.get(dt, dt)
+                    return GenerateResponse(
+                        success=False,
+                        error=f"El contenedor '{nombre}' no requiere el documento "
+                              f"'{label}'. "
+                              f"Revisa la selección de contenedores y tipos de documento.",
+                    )
+                if _is_doc_generated(dt, props):
+                    label = DOC_TYPE_LABELS_ES.get(dt, dt)
+                    return GenerateResponse(
+                        success=False,
+                        error=f"El contenedor '{nombre}' ya tiene generado el documento "
+                              f"'{label}'. "
+                              f"Realiza rollback antes de regenerar.",
+                    )
+
+        _, deal_props = _get_deal_for_contenedores(client, request.container_ids)
+
+        if DOC_TYPE_SANITARIO in set(request.doc_types):
+            deal_props = dict(deal_props)
+            deal_props["puerto_destino"] = resolve_enum_label(
+                client, "deals", "puerto_destino", deal_props.get("puerto_destino", "")
+            )
+
+        elementos_by_container = get_elementos_fabricante_por_contenedor(
+            client, request.container_ids
+        )
+
+        origen_types = {DOC_TYPE_ORIGEN_BORRADOR, DOC_TYPE_ORIGEN_FINAL}
+        if origen_types & set(request.doc_types):
+            if not request.descripcion_mercancia or not request.descripcion_mercancia.strip():
+                raise ValueError(
+                    "El campo descripcion_mercancia es obligatorio para certificados de origen."
+                )
+
+        documents_data: dict = {}
+        group_generation_ids: dict = {}
+        generated_docs: list = []
+        affected_containers_set: set = set()
+
+        for doc_type in request.doc_types:
+            group_id = str(uuid.uuid4())
+            group_generation_ids[doc_type] = group_id
+
+            if doc_type in (DOC_TYPE_ORIGEN_BORRADOR, DOC_TYPE_ORIGEN_FINAL):
+                logger.info(f"doc_type={doc_type!r}")
+                payload = build_origen_payload(
+                    request.container_ids,
+                    containers,
+                    deal_props,
+                    elementos_by_container,
+                    descripcion_mercancia=request.descripcion_mercancia,
+                    observaciones=request.observaciones or "",
+                    idioma=request.idioma,
+                )
+            elif doc_type == DOC_TYPE_SANITARIO:
+                logger.info("")
+                payload = build_sanitario_payload(
+                    request.container_ids,
+                    containers,
+                    deal_props,
+                    elementos_by_container,
+                    settings,
+                    idioma=request.idioma,
+                )
+            else:
+                logger.warning(f"doc_type desconocido ignorado: {doc_type!r}")
+                continue
+
+            documents_data[doc_type] = payload
+
+            if doc_type == DOC_TYPE_ORIGEN_BORRADOR:
+                logger.info(f"doc_type={doc_type!r} group_id={group_id}")
+
+                pdf_bytes = render_origen_borrador_v2(payload, debug=settings.pdf_debug_layout)
+                logger.info(f"[PDF_READY] size={len(pdf_bytes)} bytes")
+
+                filename = f"origen_borrador_{group_id[:8]}.pdf"
+                upload_result = upload_pdf(pdf_bytes, filename)
+                logger.info(
+                    f"[FILE_UPLOADED] file_id={upload_result.file_id} "
+                    f"url={upload_result.file_url!r}"
+                )
+
+                update_props = {
+                    "certificado_origen_borrador": upload_result.file_id,
+                    "doc_group_id_origen_borrador": group_id,
+                }
+                update_result = _batch_update_contenedores(
+                    client, request.container_ids, update_props
+                )
+                logger.info(
+                    f"[CONTAINERS_PATCHED] updated={update_result['updated']} "
+                    f"failed={update_result['failed']} "
+                    f"sample={request.container_ids[:3]}"
+                )
+
+                generated_docs.append(GeneratedDocResult(
+                    doc_type=doc_type,
+                    file_id=upload_result.file_id,
+                    file_url=upload_result.file_url,
+                    group_generation_id=group_id,
+                ))
+                affected_containers_set.update(request.container_ids)
+
+            elif doc_type == DOC_TYPE_ORIGEN_FINAL:
+                logger.info(f"doc_type={doc_type!r} group_id={group_id}")
+                logger.info(
+                    f"[PDF_RENDER_MODE] debug={settings.pdf_debug_layout}"
+                )
+                pdf_bytes = render_origen_final_v2(payload, debug=settings.pdf_debug_layout)
+                logger.info(f"[PDF_READY] size={len(pdf_bytes)} bytes")
+
+                filename = f"origen_validado_{group_id[:8]}.pdf"
+                upload_result = upload_pdf(pdf_bytes, filename)
+                logger.info(
+                    f"[FILE_UPLOADED] file_id={upload_result.file_id} "
+                    f"url={upload_result.file_url!r}"
+                )
+
+                merged_value = _merge_file_in_prop(
+                    client, request.container_ids[0],
+                    "certificado_origen", "origen_validado_", upload_result.file_id,
+                )
+                update_props = {
+                    "certificado_origen": merged_value,
+                    "doc_group_id_origen_final": group_id,
+                }
+                update_result = _batch_update_contenedores(
+                    client, request.container_ids, update_props
+                )
+                logger.info(
+                    f"[CONTAINERS_PATCHED] updated={update_result['updated']} "
+                    f"failed={update_result['failed']} "
+                    f"sample={request.container_ids[:3]}"
+                )
+
+                generated_docs.append(GeneratedDocResult(
+                    doc_type=doc_type,
+                    file_id=upload_result.file_id,
+                    file_url=upload_result.file_url,
+                    group_generation_id=group_id,
+                ))
+                affected_containers_set.update(request.container_ids)
+
+            elif doc_type == DOC_TYPE_SANITARIO:
+                logger.info(f"doc_type={doc_type!r} group_id={group_id}")
+                logger.info(f"[PDF_RENDER_MODE] debug={settings.pdf_debug_layout}")
+                pdf_bytes = render_sanitario_v2(payload, debug=settings.pdf_debug_layout)
+                logger.info(f"[PDF_READY] size={len(pdf_bytes)} bytes")
+
+                filename = f"sanitario_borrador_{group_id[:8]}.pdf"
+                upload_result = upload_pdf(pdf_bytes, filename)
+                logger.info(
+                    f"[FILE_UPLOADED] file_id={upload_result.file_id} "
+                    f"url={upload_result.file_url!r}"
+                )
+
+                merged_value = _merge_file_in_prop(
+                    client, request.container_ids[0],
+                    "certificado_sanitario", "sanitario_borrador_", upload_result.file_id,
+                )
+                update_props = {
+                    "certificado_sanitario":  merged_value,
+                    "doc_group_id_sanitario": group_id,
+                }
+                update_result = _batch_update_contenedores(
+                    client, request.container_ids, update_props
+                )
+                logger.info(
+                    f"[CONTAINERS_PATCHED] updated={update_result['updated']} "
+                    f"failed={update_result['failed']} "
+                    f"sample={request.container_ids[:3]}"
+                )
+
+                generated_docs.append(GeneratedDocResult(
+                    doc_type=doc_type,
+                    file_id=upload_result.file_id,
+                    file_url=upload_result.file_url,
+                    group_generation_id=group_id,
+                ))
+                affected_containers_set.update(request.container_ids)
+
+            else:
+                logger.info(
+                    f"doc_type={doc_type!r} → "
+                    "PDF generation not yet implemented; skipping upload/persist"
+                )
+
+        logger.info(
+            f"doc_types_built={list(documents_data.keys())} "
+            f"generated_pdfs={[d.doc_type for d in generated_docs]} "
+            f"group_ids={group_generation_ids}"
+        )
+        return GenerateResponse(
+            success=True,
+            documents_data=documents_data,
+            group_generation_ids=group_generation_ids,
+            generated_docs=generated_docs,
+            affected_containers=list(affected_containers_set),
+        )
+
+    except ValueError as e:
+        logger.warning(f"[generate_documents] error de validación: {e}")
+        return GenerateResponse(success=False, error=str(e))
+    except Exception as e:
+        logger.error(f"[generate_documents] ERROR inesperado: {e}", exc_info=True)
+        return GenerateResponse(success=False, error=str(e))
+
+async def get_generated_containers(request: GeneratedRequest) -> GeneratedResponse:
+    """Devuelve contenedores con al menos un tipo de doc generado (Tab 2)."""
+    filtros = request.filtros
+    empresa = (filtros.empresa or "").strip()
+    tipos = filtros.tipos_documento or ALL_DOC_TYPES
+
+    logger.info(
+        f"[get_generated_containers] START "
+        f"deal_id={request.deal_id!r} "
+        f"empresa={empresa!r} "
+        f"tipos_documento={tipos}"
+    )
+
+    if not empresa:
+        logger.warning("[get_generated_containers] empresa requerida pero vacía")
+        return GeneratedResponse(
+            success=False,
+            error="El filtro 'empresa' es obligatorio.",
+        )
+
+    if (filtros.etd_desde and filtros.etd_hasta
+            and filtros.etd_desde > filtros.etd_hasta):
+        return GeneratedResponse(
+            success=False,
+            error="etd_desde no puede ser mayor que etd_hasta.",
+        )
+
+    if (filtros.eta_desde and filtros.eta_hasta
+            and filtros.eta_desde > filtros.eta_hasta):
+        return GeneratedResponse(
+            success=False,
+            error="eta_desde no puede ser mayor que eta_hasta.",
+        )
+
+    try:
+        client = hubspot_client.get_client()
+
+        companies = _search_companies_by_name(client, empresa)
+        company_ids = [cid for cid, _ in companies]
+        company_name_by_id = {cid: cname for cid, cname in companies}
+
+        if not company_ids:
+            return GeneratedResponse(success=True, contenedores=[], total=0)
+
+        contenedor_to_company = _get_contenedores_for_companies(client, company_ids)
+        contenedor_ids_set = set(contenedor_to_company.keys())
+
+        contenedor_company_name = {
+            cid: company_name_by_id.get(co_id, "")
+            for cid, co_id in contenedor_to_company.items()
+        }
+
+        if not contenedor_ids_set:
+            return GeneratedResponse(success=True, contenedores=[], total=0)
+
+        contenedores_data = _batch_read_contenedores(
+            client, list(contenedor_ids_set)
+        )
+
+        filtered, discarded = _filter_by_generated_docs(contenedores_data, tipos)
+        logger.info(
+            f"[get_generated_containers] post-generated: {len(filtered)} "
+            f"({discarded} descartados por no tener ninguno generado)"
+        )
+
+        if not filtered:
+            return GeneratedResponse(success=True, contenedores=[], total=0)
+
+        filtered, descartados_5 = _filter_by_date(
+            filtered,
+            CONTENEDOR_PROP_ETD,
+            filtros.etd_desde,
+            filtros.etd_hasta,
+        )
+
+        filtered, descartados_6 = _filter_by_date(
+            filtered,
+            CONTENEDOR_PROP_ETA,
+            filtros.eta_desde,
+            filtros.eta_hasta,
+        )
+
+        deal_info = _get_deal_info_for_containers(client, list(filtered.keys()))
+        contenedores = [
+            _map_to_list_item(
+                cid, props,
+                nombre_cliente=contenedor_company_name.get(cid),
+                deal_id=deal_info.get(cid, ("", ""))[0] or None,
+                deal_name=deal_info.get(cid, ("", ""))[1] or None,
+            )
+            for cid, props in filtered.items()
+        ]
+
+        logger.info(f"[get_generated_containers] END → {len(contenedores)} con docs generados")
+        return GeneratedResponse(
+            success=True,
+            contenedores=contenedores,
+            total=len(contenedores),
+        )
 
     except Exception as e:
-        logger.error(f"get_generated_containers error: {e}", exc_info=True)
+        logger.error(f"[get_generated_containers] ERROR: {e}", exc_info=True)
         return GeneratedResponse(success=False, error=str(e))
+
+ROLLBACK_INTERNAL_DOC_TYPE_TO_PREFIX = {
+    DOC_TYPE_ORIGEN_BORRADOR: "origen_borrador_",
+    DOC_TYPE_ORIGEN_FINAL:    "origen_validado_",
+    DOC_TYPE_SANITARIO:       "sanitario_borrador_",
+}
+
+ROLLBACK_MULTI_FILE_PROPS = {"certificado_origen", "certificado_sanitario"}
+
+
+def _compute_rollback_file_value(current_raw: str, internal_doc_type: str) -> Tuple[str, List[str]]:
+    """Devuelve (new_serialized, file_ids_to_delete) para rollback. Multi-file conserva archivos sin el prefix del doc_type; single-file limpia todo."""
+    file_prop_name = DOC_TYPE_TO_FILE_PROPERTY[internal_doc_type]
+    if file_prop_name not in ROLLBACK_MULTI_FILE_PROPS:
+        return "", parse_file_ids(current_raw) if current_raw else []
+    prefix = ROLLBACK_INTERNAL_DOC_TYPE_TO_PREFIX[internal_doc_type]
+    current_ids = parse_file_ids(current_raw)
+    kept_ids: List[str] = []
+    to_delete: List[str] = []
+    for fid in current_ids:
+        meta = fetch_file_metadata(fid)
+        if meta and meta.name.startswith(prefix):
+            to_delete.append(fid)
+        else:
+            kept_ids.append(fid)
+    return serialize_file_ids(kept_ids), to_delete
 
 
 async def rollback_document(request: RollbackRequest) -> RollbackResponse:
-    """Borra el documento de un grupo y limpia propiedades en todos los contenedores.
+    """Borra el archivo del File Manager y limpia/preserva propiedades del tipo de documento en todos los contenedores del grupo. En props multi-file solo se borran los archivos cuyo nombre empieza con el prefix del doc_type."""
+    contenedor_nombre = request.contenedor_nombre
+    doc_type_api = request.doc_type
+    internal_doc_type = ROLLBACK_API_TO_INTERNAL_DOC_TYPE[doc_type_api]
+    group_prop_name = CONTENEDOR_DOC_PROPERTIES[internal_doc_type]["group_generation_id"]
+    file_prop_name = DOC_TYPE_TO_FILE_PROPERTY[internal_doc_type]
+    is_multi_file = file_prop_name in ROLLBACK_MULTI_FILE_PROPS
 
-    Pasos:
-    1. Leer propiedades del contenedor ancla (container_id) para obtener group_generation_id.
-    2. Si request.group_generation_id ya viene en el body, usarlo directamente (optimización).
-    3. Buscar TODOS los contenedores con ese group_generation_id y ese doc_type.
-    4. Para cada contenedor afectado:
-       a. Obtener file_id del tipo de doc.
-       b. Borrar archivo en File Manager (shared/files.py).
-       c. Limpiar propiedades del tipo de doc en el contenedor.
-    5. Responder con affected_containers_count.
+    logger.info(
+        f"[ROLLBACK] input: contenedor_nombre={contenedor_nombre!r} "
+        f"doc_type={doc_type_api!r} internal={internal_doc_type!r} "
+        f"group_prop={group_prop_name!r} file_prop={file_prop_name!r}"
+    )
 
-    IMPORTANTE: Validación defensiva — si falta file_id en algún contenedor,
-    responder con error claro y NO realizar borrados parciales.
-    """
     client = hubspot_client.get_client()
-    doc_type = request.doc_type
-    props_map = CONTENEDOR_DOC_PROPERTIES.get(doc_type)
 
-    if not props_map:
-        return RollbackResponse(
-            success=False,
-            error=f"doc_type no válido: {doc_type}. Válidos: {list(CONTENEDOR_DOC_PROPERTIES.keys())}"
-        )
+    props_to_clear = _clear_doc_properties(internal_doc_type)
+    props_to_clear[file_prop_name] = ""
 
     try:
-        # TODO: Paso 1 — obtener group_generation_id del contenedor ancla
-        # anchor = client.crm.objects.basic_api.get_by_id(
-        #     object_id=request.container_id,
-        #     object_type=OBJECT_TYPE_CONTENEDOR,
-        #     properties=[props_map["group_generation_id"], props_map["file_id"]],
-        # )
-        # group_id = request.group_generation_id or anchor.properties.get(props_map["group_generation_id"])
+        frontend_group_id = (request.group_id or "").strip() or None
+        if frontend_group_id:
+            logger.info(
+                f"[ROLLBACK] group_id desde frontend: {frontend_group_id!r} "
+                f"— saltando búsqueda por nombre"
+            )
+            group_id_value: Optional[str] = frontend_group_id
+        else:
+            search_props = ["nombre", group_prop_name, file_prop_name]
+            found = _search_contenedor_by_nombre(client, contenedor_nombre, search_props)
+            found_count = len(found)
 
-        # TODO: Paso 3 — buscar todos los contenedores con ese group_generation_id
-        # Usar Search API filtrando por la propiedad group_generation_id.
+            logger.info(
+                f"[ROLLBACK] contenedor resuelto: "
+                f"found_count={found_count} "
+                f"container_id={repr(list(found.keys())[0]) if found_count == 1 else 'N/A'} "
+                f"nombre={contenedor_nombre!r}"
+            )
 
-        # TODO: Paso 4 — validación defensiva
-        # Verificar que TODOS tienen file_id antes de borrar ninguno.
-        # Si alguno falta, retornar error sin tocar nada.
+            if found_count == 0:
+                return RollbackResponse(
+                    success=True,
+                    affected_containers_count=0,
+                    message="Contenedor no encontrado",
+                )
 
-        # TODO: Paso 4a/4b/4c — borrar archivo y limpiar propiedades
-        # from app.shared.files import delete_file
-        # for cid, file_id in containers_to_rollback.items():
-        #     delete_file(file_id)
-        #     client.crm.objects.basic_api.update(
-        #         object_id=cid,
-        #         object_type=OBJECT_TYPE_CONTENEDOR,
-        #         simple_public_object_input={"properties": _clear_doc_properties(doc_type)},
-        #     )
+            if found_count > 1:
+                return RollbackResponse(
+                    success=False,
+                    error=f"Nombre de contenedor no es único: {found_count} coincidencias",
+                    message="Nombre de contenedor no es único",
+                )
 
-        affected_ids: List[str] = []
+            anchor_id, anchor_props = next(iter(found.items()))
+
+            raw_group = anchor_props.get(group_prop_name)
+            raw_file = anchor_props.get(file_prop_name)
+            group_id_value = raw_group if raw_group else None
+            has_file = bool(raw_file)
+
+            logger.info(
+                f"[ROLLBACK] props resueltas: container_id={anchor_id!r} "
+                f"group_prop={group_prop_name!r} group_id_value={group_id_value!r} "
+                f"file_prop={file_prop_name!r} has_file={has_file}"
+            )
+
+            if not group_id_value:
+                if has_file:
+                    logger.info(
+                        f"[ROLLBACK] group_id_empty=True has_file=True "
+                        f"action=single_container_rollback container_id={anchor_id!r}"
+                    )
+                    new_value, to_delete = _compute_rollback_file_value(raw_file, internal_doc_type)
+                    for fid in to_delete:
+                        try:
+                            delete_file(fid)
+                        except Exception as e:
+                            logger.warning(
+                                f"[ROLLBACK] delete_file falló para file_id={fid!r}: {e}. "
+                                f"Continuando con clear de propiedades."
+                            )
+                    props_single = dict(props_to_clear)
+                    if is_multi_file:
+                        props_single[file_prop_name] = new_value
+                    result = _batch_update_contenedores(client, [anchor_id], props_single)
+                    logger.info(
+                        f"[ROLLBACK] batch update: requested_count=1 "
+                        f"updated_count={result['updated']} failed_count={len(result['failed'])} "
+                        f"sample_failed_ids={result['failed'][:3]}"
+                    )
+                    logger.info(
+                        f"[ROLLBACK] end summary: doc_type={doc_type_api!r} "
+                        f"affected_containers_count={result['updated']}"
+                    )
+                    return RollbackResponse(
+                        success=True,
+                        affected_containers_count=result["updated"],
+                        affected_container_names=[anchor_props.get("nombre", anchor_id)],
+                        message=f"Rollback aplicado a 1 contenedor para doc_type={doc_type_api}",
+                    )
+                else:
+                    logger.info(
+                        f"[ROLLBACK] group_id_empty=True has_file=False "
+                        f"action=noop container_id={anchor_id!r}"
+                    )
+                    return RollbackResponse(
+                        success=True,
+                        affected_containers_count=0,
+                        message="No hay documento generado para rollback",
+                    )
+
+        group_containers = _search_contenedores_by_group_prop(
+            client, group_prop_name, group_id_value, props=["nombre", file_prop_name]
+        )
+        group_count = len(group_containers)
+        sample_ids = list(group_containers.keys())[:3]
+
+        logger.info(
+            f"[ROLLBACK] contenedores del grupo: "
+            f"group_prop={group_prop_name!r} group_id_value={group_id_value!r} "
+            f"count={group_count} sample_container_ids={sample_ids}"
+        )
+
+        if group_count == 0:
+            logger.warning(
+                f"[ROLLBACK] búsqueda por group_id devolvió 0 resultados "
+                f"(posible race condition o ya limpiados) group_id={group_id_value!r}"
+            )
+            return RollbackResponse(
+                success=True,
+                affected_containers_count=0,
+                message=(
+                    f"No se encontraron contenedores con group_id={group_id_value!r} "
+                    f"(ya limpiados o inconsistencia)"
+                ),
+            )
+
+        all_ids = list(group_containers.keys())
+
+        sample_raw = ""
+        for props in group_containers.values():
+            sample_raw = props.get(file_prop_name) or ""
+            if sample_raw:
+                break
+        new_value, to_delete = _compute_rollback_file_value(sample_raw, internal_doc_type)
+        logger.info(
+            f"[ROLLBACK] file_ids a borrar: count={len(to_delete)} "
+            f"sample={to_delete[:3]} multi_file={is_multi_file}"
+        )
+        for fid in to_delete:
+            try:
+                delete_file(fid)
+            except Exception as e:
+                logger.warning(
+                    f"[ROLLBACK] delete_file falló para file_id={fid!r}: {e}. "
+                    f"Continuando con clear de propiedades."
+                )
+
+        props_to_apply = dict(props_to_clear)
+        if is_multi_file:
+            props_to_apply[file_prop_name] = new_value
+
+        result = _batch_update_contenedores(client, all_ids, props_to_apply)
+        sample_failed = result["failed"][:3]
+
+        logger.info(
+            f"[ROLLBACK] batch update: requested_count={group_count} "
+            f"updated_count={result['updated']} failed_count={len(result['failed'])} "
+            f"sample_failed_ids={sample_failed}"
+        )
+
+        sample_names = [
+            group_containers[cid].get("nombre", cid) for cid in all_ids[:3]
+        ]
+        message = (
+            f"Rollback aplicado a {result['updated']} contenedores para doc_type={doc_type_api}"
+        )
+        if result["failed"]:
+            message += f" ({len(result['failed'])} fallidos)"
+
+        logger.info(
+            f"[ROLLBACK] end summary: doc_type={doc_type_api!r} "
+            f"affected_containers_count={result['updated']}"
+        )
+
         return RollbackResponse(
             success=True,
-            affected_containers_count=len(affected_ids),
-            affected_container_ids=affected_ids,
+            affected_containers_count=result["updated"],
+            affected_container_names=sample_names,
+            message=message,
         )
 
     except Exception as e:
-        logger.error(f"rollback_document error: {e}", exc_info=True)
+        logger.error(f"[ROLLBACK] ERROR inesperado: {e}", exc_info=True)
         return RollbackResponse(success=False, error=str(e))
+
+
+async def get_deal_context(deal_id: str) -> DealContextResponse:
+    """Devuelve el contexto del deal (cotización padre) necesario para precarga
+    en la card de Documentos. Hoy solo `preprints_language`; se puede ampliar
+    sin romper compatibilidad."""
+    client = hubspot_client.get_client()
+    try:
+        deal = client.crm.deals.basic_api.get_by_id(
+            deal_id=deal_id,
+            properties=["preprints_language"],
+        )
+    except Exception as e:
+        logger.warning(f"[deal-context] deal={deal_id!r} no encontrado: {e}")
+        return DealContextResponse(preprints_language=None)
+
+    raw = ((deal.properties or {}).get("preprints_language") or "").strip().upper()
+    if raw not in {"ES", "EN", "FR"}:
+        return DealContextResponse(preprints_language=None)
+    return DealContextResponse(preprints_language=raw)

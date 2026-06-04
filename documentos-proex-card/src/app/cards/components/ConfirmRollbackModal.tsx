@@ -1,77 +1,75 @@
-/**
- * ConfirmRollbackModal — Bloque de confirmación inline para el rollback.
- *
- * HubSpot UI Extensions no tiene modal nativo; se usa renderizado condicional
- * dentro del tab. Este componente muestra el mensaje de advertencia y los
- * botones Confirmar / Cancelar.
- */
-
 import React from "react";
 import {
-  Box,
+  Modal,
+  ModalBody,
+  ModalFooter,
   Flex,
   Text,
   Button,
-  Heading,
   Alert,
 } from "@hubspot/ui-extensions";
 
 import { getDocTypeLabel } from "../utils/documentos.utils";
 
 interface ConfirmRollbackModalProps {
+  modalId: string;
   contenedorName: string;
   docType: string;
-  affectedCount?: number;
+  affectedCount: number;
   onConfirm: () => void;
-  onCancel: () => void;
-  loading?: boolean;
+  actions: any;
 }
 
 const ConfirmRollbackModal: React.FC<ConfirmRollbackModalProps> = ({
+  modalId,
   contenedorName,
   docType,
   affectedCount,
   onConfirm,
-  onCancel,
-  loading = false,
+  actions,
 }) => {
   const docLabel = getDocTypeLabel(docType);
 
   return (
-    <Box>
-      <Alert title="Confirmar borrado" variant="warning">
+    <Modal id={modalId} title="Confirmar borrado" variant="danger" width="sm">
+      <ModalBody>
         <Flex direction="column" gap="small">
-          <Text>
-            Vas a borrar el documento <Text format={{ fontWeight: "bold" }}>{docLabel}</Text>{" "}
-            generado desde el contenedor <Text format={{ fontWeight: "bold" }}>{contenedorName}</Text>.
-          </Text>
-          {affectedCount !== undefined && affectedCount > 1 && (
-            <Text>
-              Este documento fue generado para un grupo de{" "}
-              <Text format={{ fontWeight: "bold" }}>{affectedCount} contenedores</Text>.
-              Se borrará en todos ellos.
-            </Text>
+          <Flex direction="row" gap="extra-small">
+            <Text>Documento:</Text>
+            <Text format={{ fontWeight: "bold" }}>{docLabel}</Text>
+          </Flex>
+          <Flex direction="row" gap="extra-small">
+            <Text>Contenedor:</Text>
+            <Text format={{ fontWeight: "bold" }}>{contenedorName}</Text>
+          </Flex>
+          {affectedCount > 1 && (
+            <Alert title={`Este rollback afectará a ${affectedCount} contenedores`} variant="warning">
+              Todos los contenedores generados en el mismo lote perderán este documento.
+            </Alert>
           )}
           <Text>Esta acción no se puede deshacer.</Text>
-          <Flex direction="row" gap="small">
-            <Button
-              variant="destructive"
-              onClick={onConfirm}
-              disabled={loading}
-            >
-              {loading ? "Borrando..." : "Confirmar borrado"}
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={onCancel}
-              disabled={loading}
-            >
-              Cancelar
-            </Button>
-          </Flex>
         </Flex>
-      </Alert>
-    </Box>
+      </ModalBody>
+      <ModalFooter>
+        <Flex direction="row" gap="small" justify="end">
+          <Button
+            variant="secondary"
+            onClick={() => actions.closeOverlay(modalId)}
+          >
+            Cancelar
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => {
+              onConfirm();
+              actions.closeOverlay(modalId);
+            }}
+          >
+            Borrar
+          </Button>
+        </Flex>
+      </ModalFooter>
+    </Modal>
   );
 };
 
