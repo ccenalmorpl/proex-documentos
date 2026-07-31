@@ -7,6 +7,7 @@ import {
   Alert,
   Divider,
 } from "@hubspot/ui-extensions";
+import { CrmDataHighlight } from "@hubspot/ui-extensions/crm";
 
 import FiltrosDocumentos from "../components/FiltrosDocumentos";
 import ContenedoresTable from "../components/ContenedoresTable";
@@ -17,10 +18,10 @@ import {
   buildRollbackPayload,
   type FiltrosState,
   type ContenedorItem,
-  type BaseDate,
 } from "../utils/documentos.utils";
 import {
   DEFAULT_FILTROS,
+  COMPANY_HIGHLIGHT_PROPS,
   DOCUMENTOS_ERRORS,
   DOCUMENTOS_SUCCESS,
 } from "../constants/documentos.constants";
@@ -34,7 +35,7 @@ const DocumentosHistoricoTab: React.FC<DocumentosHistoricoTabProps> = ({
   context,
   actions,
 }) => {
-  const dealId: string = context?.crm?.objectId ?? "";
+  const companyId: string = context?.crm?.objectId ?? "";
 
   const [filtros, setFiltros] = useState<FiltrosState>({ ...DEFAULT_FILTROS });
   const [contenedores, setContenedores] = useState<ContenedorItem[]>([]);
@@ -45,15 +46,15 @@ const DocumentosHistoricoTab: React.FC<DocumentosHistoricoTabProps> = ({
   const [hasSearched, setHasSearched] = useState(false);
 
   const handleFiltroChange = useCallback(
-    (field: keyof FiltrosState, value: string | string[] | BaseDate | null) => {
+    (field: keyof FiltrosState, value: string[]) => {
       setFiltros((prev) => ({ ...prev, [field]: value }));
     },
     []
   );
 
   const handleApplyFiltros = useCallback(async () => {
-    if (!dealId) {
-      setError("No se encontró el ID del Deal en el contexto.");
+    if (!companyId) {
+      setError("No se encontró la empresa en el contexto de la card.");
       return;
     }
     setError(null);
@@ -61,7 +62,7 @@ const DocumentosHistoricoTab: React.FC<DocumentosHistoricoTabProps> = ({
     setLoadingList(true);
     setHasSearched(true);
     try {
-      const payload = buildGeneratedPayload(dealId, filtros);
+      const payload = buildGeneratedPayload(companyId, filtros);
       const response = await fetchFromAPI(API_CONFIG.endpoints.documentosGenerated, {
         method: "POST",
         body: payload,
@@ -72,7 +73,7 @@ const DocumentosHistoricoTab: React.FC<DocumentosHistoricoTabProps> = ({
     } finally {
       setLoadingList(false);
     }
-  }, [dealId, filtros]);
+  }, [companyId, filtros]);
 
   const handleRollback = useCallback(
     async (contenedor: ContenedorItem, docType: string) => {
@@ -100,6 +101,10 @@ const DocumentosHistoricoTab: React.FC<DocumentosHistoricoTabProps> = ({
 
   return (
     <Flex direction="column" gap="medium">
+
+      {companyId && (
+        <CrmDataHighlight properties={COMPANY_HIGHLIGHT_PROPS} />
+      )}
 
       <FiltrosDocumentos
         filtros={filtros}

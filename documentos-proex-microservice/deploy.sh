@@ -11,6 +11,10 @@
 # Variables de entorno requeridas en .env:
 #   PROEX_ACCESS_TOKEN           - HubSpot private app access token
 #   CORS_ORIGINS                 - Orígenes CORS permitidos (CSV)
+#   HUBSPOT_WEBHOOK_SECRET       - Secreto compartido con el workflow de HubSpot
+#                                  (header X-Webhook-Token de /webhooks/pedido-preparar-doc)
+#   PROEX_CARD_SECRET            - Secreto compartido con la card (header Authorization
+#                                  Bearer en /api/v1/documentos, /empresas, /pedidos)
 #   SANITARIO_EMPRESA_DIRECCION  - Texto fijo empresa+dirección para certificado sanitario
 #   SANITARIO_ESTABLECIMIENTO    - Establecimiento fijo del certificado sanitario
 #   SANITARIO_JEFE_SALUD         - Jefe de salud fijo del certificado sanitario
@@ -42,6 +46,15 @@ if ! aws ecr describe-repositories --repository-names ${ECR_REPO_NAME} --region 
 else
   echo "✅ ECR repository already exists"
 fi
+
+# Lifecycle policy: conservar solo las 10 imagenes sin etiqueta mas recientes (nunca toca 'latest')
+echo "🧹 Aplicando lifecycle policy ECR (conservar 10 untagged)..."
+aws ecr put-lifecycle-policy \
+  --repository-name ${ECR_REPO_NAME} \
+  --region ${AWS_REGION} \
+  --profile ${AWS_PROFILE} \
+  --lifecycle-policy-text '{"rules":[{"rulePriority":1,"description":"Conservar las 10 imagenes sin etiqueta mas recientes; expirar el resto. Nunca toca imagenes etiquetadas (latest).","selection":{"tagStatus":"untagged","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}' \
+  >/dev/null && echo "✅ Lifecycle policy aplicada"
 
 # Set ECR repository policy to allow Lambda access
 echo "🔐 Setting ECR repository policy..."
@@ -171,6 +184,8 @@ if ! aws lambda get-function --function-name ${FUNCTION_NAME} --region ${AWS_REG
     --environment "Variables={
       PROEX_ACCESS_TOKEN=${PROEX_ACCESS_TOKEN},
       CORS_ORIGINS=\"${CORS_ORIGINS}\",
+      HUBSPOT_WEBHOOK_SECRET=${HUBSPOT_WEBHOOK_SECRET},
+      PROEX_CARD_SECRET=${PROEX_CARD_SECRET},
       SANITARIO_EMPRESA_DIRECCION=\"${SANITARIO_EMPRESA_DIRECCION}\",
       SANITARIO_ESTABLECIMIENTO=\"${SANITARIO_ESTABLECIMIENTO}\",
       SANITARIO_JEFE_SALUD=\"${SANITARIO_JEFE_SALUD}\",
@@ -217,6 +232,8 @@ else
     --environment "Variables={
       PROEX_ACCESS_TOKEN=${PROEX_ACCESS_TOKEN},
       CORS_ORIGINS=\"${CORS_ORIGINS}\",
+      HUBSPOT_WEBHOOK_SECRET=${HUBSPOT_WEBHOOK_SECRET},
+      PROEX_CARD_SECRET=${PROEX_CARD_SECRET},
       SANITARIO_EMPRESA_DIRECCION=\"${SANITARIO_EMPRESA_DIRECCION}\",
       SANITARIO_ESTABLECIMIENTO=\"${SANITARIO_ESTABLECIMIENTO}\",
       SANITARIO_JEFE_SALUD=\"${SANITARIO_JEFE_SALUD}\",

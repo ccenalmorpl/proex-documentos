@@ -7,51 +7,41 @@ import {
   Form,
   Heading,
   LoadingSpinner,
-  SearchInput,
   Select,
   Text,
 } from "@hubspot/ui-extensions";
+import { CrmDataHighlight } from "@hubspot/ui-extensions/crm";
 
-import { useDebounce } from "../hooks/useDebounce";
 import {
   fetchPedidoDetalle,
   fetchPedidosByEmpresa,
-  searchEmpresas,
 } from "../utils/gestion.api";
 import {
-  buildEstadoBL,
   buildEstadoOrigen,
   buildEstadoSanitario,
   ESTADO_COBRO_TOLERANCIA,
   parseFloatOrZero,
-  type EmpresaItem,
   type PedidoDetalle,
   type PedidoMock,
   type PedidoResumen,
 } from "../utils/documentos.utils";
 import {
-  TIPO_PEDIDO_EXPORTACION,
-  TIPO_PEDIDO_NACIONAL,
-  TIPO_PEDIDO_NACIONAL_SAN_ROQUE,
+  COMPANY_HIGHLIGHT_PROPS,
+  TIPO_PEDIDO_CONTENEDOR,
+  TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE,
+  TIPO_PEDIDO_CAMION,
+  TIPO_PEDIDO_CAMION_SAN_ROQUE,
   type TipoPedido,
 } from "../constants/documentos.constants";
 
 interface SelectorEmpresaPedidoProps {
+  companyId: string;
   onCargarPedido: (pedido: PedidoMock) => void;
-  empresaQuery: string;
-  empresaId: string;
   pedidoNumero: string;
-  onEmpresaQueryChange: (q: string) => void;
-  onEmpresaIdChange: (id: string) => void;
   onPedidoNumeroChange: (numero: string) => void;
-  empresasCache: { query: string; items: EmpresaItem[] } | null;
   pedidosCache: { empresaId: string; items: PedidoResumen[] } | null;
-  onEmpresasLoaded: (query: string, items: EmpresaItem[]) => void;
   onPedidosLoaded: (empresaId: string, items: PedidoResumen[]) => void;
 }
-
-const MIN_EMPRESA_QUERY = 2;
-const DEBOUNCE_MS = 300;
 
 const FALLBACK_DASH = "—";
 
@@ -60,12 +50,18 @@ const valueOrDash = (raw: string | null | undefined): string =>
 
 const tipoFlujoToTipoPedido = (tipoFlujo: string | null): TipoPedido => {
   switch (tipoFlujo) {
-    case TIPO_PEDIDO_NACIONAL:
-      return TIPO_PEDIDO_NACIONAL;
-    case TIPO_PEDIDO_NACIONAL_SAN_ROQUE:
-      return TIPO_PEDIDO_NACIONAL_SAN_ROQUE;
+    case TIPO_PEDIDO_CAMION:
+    case "nacional": // legacy (pre-renombrado)
+      return TIPO_PEDIDO_CAMION;
+    case TIPO_PEDIDO_CAMION_SAN_ROQUE:
+    case "nacional_san_roque": // legacy
+      return TIPO_PEDIDO_CAMION_SAN_ROQUE;
+    case TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE:
+      return TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE;
+    case TIPO_PEDIDO_CONTENEDOR:
+    case "exportacion": // legacy
     default:
-      return TIPO_PEDIDO_EXPORTACION;
+      return TIPO_PEDIDO_CONTENEDOR;
   }
 };
 
@@ -115,6 +111,7 @@ const buildPedidoFromDetalle = (detalle: PedidoDetalle): PedidoMock => {
       total_cajas_pedido:    sumTotalCajas(detalle.contenedores),
       puerto_destino:        detalle.info.puerto_destino ?? "",
       puerto_salida:         detalle.info.puerto_salida ?? "",
+      tipo_de_venta:         detalle.info.tipo_de_venta ?? "",
       descripcion_mercancia: detalle.info.descripcion_mercancia ?? "",
       fecha_de_entrega:      detalle.info.fecha_de_entrega,
       lugar_carga:           detalle.info.lugar_carga ?? "",
@@ -139,7 +136,6 @@ const buildPedidoFromDetalle = (detalle: PedidoDetalle): PedidoMock => {
     documentos_a_generar: aggregateDocumentosAGenerar(detalle.contenedores),
     estado_cobro:         importePendienteTotal <= ESTADO_COBRO_TOLERANCIA ? "cobrado" : "pendiente",
     importe_pendiente:    importePendienteTotal,
-    estado_bl:            buildEstadoBL(detalle.info),
     estado_origen:        buildEstadoOrigen(detalle.info),
     estado_sanitario:     buildEstadoSanitario(detalle.info),
     select_options:       detalle.select_options ?? {},
@@ -147,81 +143,31 @@ const buildPedidoFromDetalle = (detalle: PedidoDetalle): PedidoMock => {
 };
 
 const SelectorEmpresaPedido: React.FC<SelectorEmpresaPedidoProps> = ({
+  companyId,
   onCargarPedido,
-  empresaQuery,
-  empresaId: empresaSeleccionadaId,
   pedidoNumero,
-  onEmpresaQueryChange,
-  onEmpresaIdChange,
   onPedidoNumeroChange,
-  empresasCache,
   pedidosCache,
-  onEmpresasLoaded,
   onPedidosLoaded,
 }) => {
-  const debouncedQuery = useDebounce(empresaQuery, DEBOUNCE_MS);
-
-  const [loadingEmpresas, setLoadingEmpresas] = useState(false);
-  const [errorEmpresas, setErrorEmpresas] = useState<string | null>(null);
-
   const [loadingPedidos, setLoadingPedidos] = useState(false);
   const [errorPedidos, setErrorPedidos] = useState<string | null>(null);
 
   const [loadingDetalle, setLoadingDetalle] = useState(false);
   const [errorDetalle, setErrorDetalle] = useState<string | null>(null);
 
-  const empresas: EmpresaItem[] =
-    empresasCache && empresasCache.query === debouncedQuery.trim()
-      ? empresasCache.items
-      : [];
   const pedidos: PedidoResumen[] =
-    pedidosCache && pedidosCache.empresaId === empresaSeleccionadaId
+    pedidosCache && pedidosCache.empresaId === companyId
       ? pedidosCache.items
       : [];
 
   useEffect(() => {
-    const q = debouncedQuery.trim();
-    if (q.length < MIN_EMPRESA_QUERY) {
-      setErrorEmpresas(null);
-      setLoadingEmpresas(false);
-      return;
-    }
-    if (empresasCache && empresasCache.query === q) {
-      setLoadingEmpresas(false);
-      setErrorEmpresas(null);
-      return;
-    }
-
-    let cancelled = false;
-    setLoadingEmpresas(true);
-    setErrorEmpresas(null);
-
-    searchEmpresas(q)
-      .then((items) => {
-        if (cancelled) return;
-        onEmpresasLoaded(q, items);
-      })
-      .catch((err: any) => {
-        if (cancelled) return;
-        onEmpresasLoaded(q, []);
-        setErrorEmpresas(err?.message ?? "Error buscando empresas.");
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingEmpresas(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [debouncedQuery, empresasCache, onEmpresasLoaded]);
-
-  useEffect(() => {
-    if (!empresaSeleccionadaId) {
+    if (!companyId) {
       setErrorPedidos(null);
       setLoadingPedidos(false);
       return;
     }
-    if (pedidosCache && pedidosCache.empresaId === empresaSeleccionadaId) {
+    if (pedidosCache && pedidosCache.empresaId === companyId) {
       setLoadingPedidos(false);
       setErrorPedidos(null);
       return;
@@ -231,14 +177,16 @@ const SelectorEmpresaPedido: React.FC<SelectorEmpresaPedidoProps> = ({
     setLoadingPedidos(true);
     setErrorPedidos(null);
 
-    fetchPedidosByEmpresa(empresaSeleccionadaId)
+    fetchPedidosByEmpresa(companyId)
       .then((items) => {
         if (cancelled) return;
-        onPedidosLoaded(empresaSeleccionadaId, items);
+        onPedidosLoaded(companyId, items);
       })
       .catch((err: any) => {
         if (cancelled) return;
-        onPedidosLoaded(empresaSeleccionadaId, []);
+        // No sembramos la caché en el error: así el Alert persiste. Si cacheáramos
+        // items:[], el cambio de referencia de pedidosCache re-dispararía el efecto,
+        // que entraría en la rama de cache-hit y limpiaría el error (bug).
         setErrorPedidos(err?.message ?? "Error cargando pedidos.");
       })
       .finally(() => {
@@ -248,12 +196,7 @@ const SelectorEmpresaPedido: React.FC<SelectorEmpresaPedidoProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [empresaSeleccionadaId, pedidosCache, onPedidosLoaded]);
-
-  const empresaOptions = useMemo(
-    () => empresas.map((e) => ({ label: e.name || `(sin nombre · ${e.id})`, value: e.id })),
-    [empresas],
-  );
+  }, [companyId, pedidosCache, onPedidosLoaded]);
 
   const pedidoOptions = useMemo(
     () =>
@@ -267,13 +210,12 @@ const SelectorEmpresaPedido: React.FC<SelectorEmpresaPedidoProps> = ({
     [pedidos],
   );
 
-  const empresaSeleccionada = empresas.find((e) => e.id === empresaSeleccionadaId) ?? null;
-  const pedidoSeleccionado  = pedidos.find((p) => p.numero_de_pedido === pedidoNumero) ?? null;
+  const pedidoSeleccionado = pedidos.find((p) => p.numero_de_pedido === pedidoNumero) ?? null;
 
-  const canSubmit = !!empresaSeleccionada && !!pedidoSeleccionado && !loadingDetalle;
+  const canSubmit = !!pedidoSeleccionado && !loadingDetalle;
 
   const handleCargar = async () => {
-    if (!empresaSeleccionada || !pedidoSeleccionado) return;
+    if (!pedidoSeleccionado || !companyId) return;
 
     setLoadingDetalle(true);
     setErrorDetalle(null);
@@ -281,7 +223,7 @@ const SelectorEmpresaPedido: React.FC<SelectorEmpresaPedidoProps> = ({
     try {
       const detalle = await fetchPedidoDetalle(
         pedidoSeleccionado.numero_de_pedido,
-        empresaSeleccionada.id,
+        companyId,
       );
       onCargarPedido(buildPedidoFromDetalle(detalle));
     } catch (err: any) {
@@ -291,57 +233,25 @@ const SelectorEmpresaPedido: React.FC<SelectorEmpresaPedidoProps> = ({
     }
   };
 
-  const empresaDescription =
-    empresaQuery.trim().length < MIN_EMPRESA_QUERY
-      ? `Escribe al menos ${MIN_EMPRESA_QUERY} caracteres para buscar.`
-      : loadingEmpresas
-        ? "Buscando..."
-        : `${empresas.length} resultado${empresas.length === 1 ? "" : "s"}.`;
-
   return (
     <Box>
-      <Heading>Selecciona empresa y pedido</Heading>
+      <Heading>Selecciona el pedido</Heading>
       <Text variant="microcopy">
-        Carga los contenedores ya gestionados en el pipeline de pedidos para gestionar su documentación.
+        Carga los contenedores ya gestionados en el pipeline de pedidos de esta empresa para gestionar su documentación.
       </Text>
+
+      {companyId && (
+        <CrmDataHighlight properties={COMPANY_HIGHLIGHT_PROPS} />
+      )}
+
       <Form>
         <Flex direction="column" gap="small">
-          <SearchInput
-            label="Empresa"
-            name="empresa_gestion"
-            value={empresaQuery}
-            onInput={(v: string) => {
-              onEmpresaQueryChange(v);
-              onEmpresaIdChange("");
-              onPedidoNumeroChange("");
-            }}
-            placeholder=""
-            required
-            description={empresaDescription}
-          />
-
-          {loadingEmpresas && <LoadingSpinner label="Buscando empresas..." />}
-          {errorEmpresas && (
-            <Alert title="Error buscando empresas" variant="error">
-              {errorEmpresas}
+          {!companyId && (
+            <Alert title="Falta la empresa en el contexto" variant="warning">
+              La card no recibió un objectId de Company en el contexto de HubSpot.
+              Asegúrate de instalar la card sobre un registro de Empresa.
             </Alert>
           )}
-
-          <Select
-            label="Empresa encontrada"
-            name="empresa_id"
-            value={empresaSeleccionadaId}
-            options={empresaOptions}
-            onChange={(v) => {
-              const next = String(v ?? "");
-              if (next !== empresaSeleccionadaId) onPedidoNumeroChange("");
-              onEmpresaIdChange(next);
-            }}
-            placeholder="Seleccionar..."
-            required
-            readOnly={empresas.length === 0}
-            description="Empresas que coinciden con la búsqueda."
-          />
 
           {loadingPedidos && <LoadingSpinner label="Cargando pedidos..." />}
           {errorPedidos && (
@@ -358,8 +268,8 @@ const SelectorEmpresaPedido: React.FC<SelectorEmpresaPedidoProps> = ({
             onChange={(v) => onPedidoNumeroChange(String(v ?? ""))}
             placeholder="Seleccionar..."
             required
-            readOnly={!empresaSeleccionadaId || pedidos.length === 0}
-            description="Pedidos asociados a la empresa seleccionada."
+            readOnly={!companyId || pedidos.length === 0}
+            description="Pedidos asociados a la empresa del contexto."
           />
 
           {loadingDetalle && <LoadingSpinner label="Cargando detalle del pedido..." />}

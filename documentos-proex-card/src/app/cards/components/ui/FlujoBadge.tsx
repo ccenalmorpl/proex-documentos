@@ -3,9 +3,10 @@ import { Tag } from "@hubspot/ui-extensions";
 
 import {
   FLUJO_LABELS,
-  TIPO_PEDIDO_EXPORTACION,
-  TIPO_PEDIDO_NACIONAL,
-  TIPO_PEDIDO_NACIONAL_SAN_ROQUE,
+  TIPO_PEDIDO_CONTENEDOR,
+  TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE,
+  TIPO_PEDIDO_CAMION,
+  TIPO_PEDIDO_CAMION_SAN_ROQUE,
   type TipoPedido,
 } from "../../constants/documentos.constants";
 
@@ -14,9 +15,10 @@ interface FlujoBadgeProps {
 }
 
 const VARIANTS: Record<TipoPedido, "info" | "success"> = {
-  [TIPO_PEDIDO_EXPORTACION]:        "info",
-  [TIPO_PEDIDO_NACIONAL]:           "success",
-  [TIPO_PEDIDO_NACIONAL_SAN_ROQUE]: "success",
+  [TIPO_PEDIDO_CONTENEDOR]:             "info",
+  [TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE]:  "info",
+  [TIPO_PEDIDO_CAMION]:                "success",
+  [TIPO_PEDIDO_CAMION_SAN_ROQUE]:      "success",
 };
 
 export const FlujoBadge: React.FC<FlujoBadgeProps> = ({ tipoPedido }) => (

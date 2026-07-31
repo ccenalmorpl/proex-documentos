@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, List, Optional
 
 from hubspot.crm.objects import (
@@ -80,18 +81,30 @@ def get_elementos_fabricante_por_contenedor(
     return result
 
 
+_ID_PREFIX_RE = re.compile(r"^\s*\d{6,}(?:-\d+)?\s*-\s*")
+
+
+def _strip_id_prefix(nombre: Optional[str]) -> Optional[str]:
+    if not nombre:
+        return nombre
+    cleaned = _ID_PREFIX_RE.sub("", nombre, count=1).strip()
+    return cleaned or nombre
+
+
 def calcular_descripcion_mercancia_agregada(
-    elementos: List[Dict], idioma: Optional[str]
+    elementos: List[Dict],
 ) -> Optional[str]:
-    """Concatena `descripcion_mercancia_{idioma}` de cada elemento fabricante,
-    una línea por elemento. Idioma normalizado a es|en|fr (default es)."""
-    lang = (idioma or "").strip().lower()
-    if lang not in {"es", "en", "fr"}:
-        lang = "es"
-    campo = f"descripcion_mercancia_{lang}"
+    """Descripción interna del contenedor: una línea por elemento fabricante
+    con formato `<nº cajas> CAJAS <nombre interno>`, sin el prefijo de SKU y
+    siempre en español. Se calcula en runtime desde `cantidad` + `nombre`."""
     lineas: List[str] = []
     for el in elementos:
-        valor = (el.get(campo) or "").strip()
-        if valor:
-            lineas.append(valor)
+        nombre = _strip_id_prefix((el.get("nombre") or "").strip())
+        if not nombre:
+            continue
+        try:
+            cajas = int(float(el.get("cantidad")))
+        except (TypeError, ValueError):
+            cajas = 0
+        lineas.append(f"{cajas} CAJAS {nombre}")
     return "\n".join(lineas) if lineas else None

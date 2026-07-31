@@ -31,6 +31,8 @@ class BLArchivo(BaseModel):
     name: str
     url: Optional[str] = None
     tipo: Literal["borrador", "final", "desconocido"]
+    # Fecha de subida (ISO YYYY-MM-DD) derivada del createdAt del fichero en HubSpot.
+    created_at: Optional[str] = None
 
 
 class CertificadoArchivo(BaseModel):
@@ -38,6 +40,8 @@ class CertificadoArchivo(BaseModel):
     name: str
     url: Optional[str] = None
     tipo: Literal["borrador", "validado", "sellado", "desconocido"]
+    # Fecha de subida (ISO YYYY-MM-DD) derivada del createdAt del fichero en HubSpot.
+    created_at: Optional[str] = None
 
 
 class OtroDocArchivo(BaseModel):
@@ -48,12 +52,16 @@ class OtroDocArchivo(BaseModel):
         "dua", "arc", "eur1", "anexo_i", "inspeccion",
         "waiver_borrador", "waiver_final", "desconocido"
     ]
+    # Fecha de subida (ISO YYYY-MM-DD) derivada del createdAt del fichero en HubSpot.
+    created_at: Optional[str] = None
 
 
 class ArchivoSimple(BaseModel):
     file_id: str
     name: str
     url: Optional[str] = None
+    # Fecha de subida (ISO YYYY-MM-DD) derivada del createdAt del fichero en HubSpot.
+    created_at: Optional[str] = None
 
 
 class DealFile(BaseModel):
@@ -69,6 +77,8 @@ class PedidoInfo(BaseModel):
     notify: Optional[str] = None
     puerto_destino: Optional[str] = None
     puerto_salida: Optional[str] = None
+    # Tipo de venta (Incoterm) del Negocio Cotización, ya resuelto a etiqueta.
+    tipo_de_venta: Optional[str] = None
     descripcion_mercancia: Optional[str] = None
     observaciones: Optional[str] = None
     fecha_de_entrega: Optional[str] = None
@@ -81,9 +91,12 @@ class PedidoInfo(BaseModel):
     bl_validado_administracion: bool = False
     bl_enviado_cliente: bool = False
     tipo_de_bl: Optional[str] = None
+    numero_de_booking: Optional[str] = None
     bl_archivos: List[BLArchivo] = Field(default_factory=list)
     certificado_origen_validado: bool = False
     certificado_sanitario_validado: bool = False
+    certificado_origen_enviar_a_firmar: bool = False
+    certificado_sanitario_enviar_a_firmar: bool = False
     origen_archivos: List[CertificadoArchivo] = Field(default_factory=list)
     sanitario_archivos: List[CertificadoArchivo] = Field(default_factory=list)
     factura_pedido: Optional[DealFile] = None
@@ -106,6 +119,11 @@ class ContenedorDetalleItem(BaseModel):
     eta: Optional[str] = None
     tipo_contenedor: Optional[str] = None
     total_cajas: Optional[str] = None
+    # Transitario asignado al pedido-deal del contenedor (readonly, solo se muestra).
+    # En modo doble flete (camión con tramo marítimo) `transitario` es el marítimo
+    # y `transitario_terrestre` el terrestre; en legacy solo viene el primero.
+    transitario: Optional[str] = None
+    transitario_terrestre: Optional[str] = None
     descripcion_mercancia_agregada: Optional[str] = None
     documentos_a_generar: List[str] = Field(default_factory=list)
     importe_pendiente_cobro: Optional[str] = None
@@ -120,6 +138,32 @@ class ContenedorDetalleItem(BaseModel):
     waiver_validado: bool = False
     fecha_llegada_contenedor: Optional[str] = None
     fecha_retirada_mercancia: Optional[str] = None
+    # Envío por mensajería: datos de administración (editable) + albarán de recogida
+    # (subida real). Sin fechas.
+    datos_envio_mensajeria: Optional[str] = None
+    albaran_mensajeria: Optional[ArchivoSimple] = None
+    # Cambio 2 — datos de factura de SAP por contenedor (cada contenedor = un
+    # pedido-deal con su factura). Solo lectura; se muestran en la tabla del 3er tab.
+    numero_de_factura: Optional[str] = None
+    fecha_de_vencimiento_factura: Optional[str] = None
+    # Cambio 2 — props del pedido-deal del contenedor: booking individualizable y
+    # documentos de cabecera (factura/packing/carta) propios de cada contenedor.
+    numero_de_booking: Optional[str] = None
+    factura_pedido: Optional[DealFile] = None
+    packing_list_pedido: Optional[DealFile] = None
+    carta_porte_pedido: Optional[DealFile] = None
+    # BL por contenedor: se lee del Negocio Documento del contenedor (autoritativo)
+    # con fallback al Negocio Pedido. La escritura aplica solo a los seleccionados.
+    bl_validado_logistica: bool = False
+    bl_validado_administracion: bool = False
+    bl_enviado_cliente: bool = False
+    tipo_de_bl: Optional[str] = None
+    cambios_en_bl: Optional[str] = None
+    bl_archivos: List[BLArchivo] = Field(default_factory=list)
+    # Negocio Documento del contenedor: si no existe, el pedido aún no completó su
+    # pipeline y el contenedor no es gestionable en este asistente.
+    tiene_negocio_documento: bool = False
+    documento_dealstage: Optional[str] = None
 
 
 class EmpresaResumen(BaseModel):
@@ -133,6 +177,8 @@ class PedidoDetalle(BaseModel):
     empresa: EmpresaResumen
     info: PedidoInfo = Field(default_factory=PedidoInfo)
     tipo_flujo: Optional[str] = None
+    es_contenedor: bool = True
+    es_san_roque: bool = False
     carga_por_palets: Optional[bool] = None
     fotos_de_carga: bool = False
     contenedores: List[ContenedorDetalleItem] = Field(default_factory=list)
@@ -154,11 +200,38 @@ class UpdatePedidoBLRequest(BaseModel):
     bl_validado_administracion: Optional[bool] = None
     bl_enviado_cliente: Optional[bool] = None
     tipo_de_bl: Optional[str] = None
+    cambios_en_bl: Optional[str] = None
+    # Subconjunto de contenedores (embarque) al que aplica el BL. Vacío/None → todos
+    # los del pedido. El backend intersecta con los contenedores reales del pedido.
+    contenedor_ids: Optional[List[str]] = None
+
+
+class UpdateContenedorBookingRequest(BaseModel):
+    # Cambio 2 — el booking es individual por contenedor: se escribe SOLO en el
+    # pedido-deal de ese contenedor (un pedido puede tener bookings distintos).
+    numero_de_booking: Optional[str] = None
 
 
 class UpdateContenedoresCertificadosRequest(BaseModel):
     certificado_origen_validado: Optional[bool] = None
     certificado_sanitario_validado: Optional[bool] = None
+    certificado_origen_enviar_a_firmar: Optional[bool] = None
+    certificado_sanitario_enviar_a_firmar: Optional[bool] = None
+
+
+class UpdateContenedorDatosRequest(BaseModel):
+    numero_contenedor: Optional[str] = None
+    numero_precinto: Optional[str] = None
+    peso_bruto: Optional[str] = None
+    peso_neto: Optional[str] = None
+    tara: Optional[str] = None
+
+
+class UpdateContenedorFechasRequest(BaseModel):
+    # ETD/ETA por contenedor: se escriben en el pedido-deal y el documento-deal del
+    # contenedor (Documento manda en la lectura). Formato ISO "YYYY-MM-DD" o "" para limpiar.
+    etd: Optional[str] = None
+    eta: Optional[str] = None
 
 
 class UpdateContenedorEntregaRequest(BaseModel):
@@ -169,6 +242,7 @@ class UpdateContenedorEntregaRequest(BaseModel):
     waiver_validado: Optional[bool] = None
     fecha_llegada_contenedor: Optional[str] = None
     fecha_retirada_mercancia: Optional[str] = None
+    datos_envio_mensajeria: Optional[str] = None
 
 
 class UpdatePedidoResponse(BaseModel):

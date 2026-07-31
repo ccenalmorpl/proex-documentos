@@ -12,9 +12,11 @@ import {
   Divider,
   Tag,
   Link,
+  Alert,
   LoadingSpinner,
 } from "@hubspot/ui-extensions";
 
+import { formatDateES } from "../utils/documentos.utils";
 import type {
   CertificadoArchivo,
   EstadoCertificado,
@@ -37,6 +39,8 @@ interface CertificadoStepperProps {
   actions: any;
   onChange: (next: EstadoCertificado) => void;
   onUpdated: () => void | Promise<void>;
+  /** Subconjunto del embarque al que replicar el certificado; vacío = todos. */
+  contenedorIdsDestino?: string[];
 }
 
 const tipoDocumentoFor = (
@@ -61,6 +65,9 @@ const FileRowReadonly: React.FC<{
       </StatusTag>
     ) : (
       <Tag variant="warning">{warningText}</Tag>
+    )}
+    {archivo?.created_at && (
+      <Text variant="microcopy">Subido el {formatDateES(archivo.created_at)}</Text>
     )}
   </Flex>
 );
@@ -110,6 +117,9 @@ const FileRowEditable: React.FC<{
         </>
       )}
     </Flex>
+    {archivo?.created_at && (
+      <Text variant="microcopy">Subido el {formatDateES(archivo.created_at)}</Text>
+    )}
   </Flex>
 );
 
@@ -122,9 +132,13 @@ const CertificadoStepper: React.FC<CertificadoStepperProps> = ({
   actions,
   onChange,
   onUpdated,
+  contenedorIdsDestino,
 }) => {
   const [deletingFileIds, setDeletingFileIds] = useState<Set<string>>(new Set());
   const [uploadingDocs,   setUploadingDocs]   = useState<Set<string>>(new Set());
+
+  const destinoSubconjunto =
+    !!contenedorIdsDestino && contenedorIdsDestino.length > 0;
 
   const tieneBorrador = !!estado.borrador;
   const tieneValidado = !!estado.validado;
@@ -185,6 +199,22 @@ const CertificadoStepper: React.FC<CertificadoStepperProps> = ({
     );
   };
 
+  const handleToggleEnviarFirmar = (checked: boolean) => {
+    const description = checked ? "Marcado para enviar a firmar" : "Quitado enviar a firmar";
+    if (tipoCertificado === "origen") {
+      return patchCheckbox(
+        { certificado_origen_enviar_a_firmar: checked },
+        { ...estado, enviarAFirmar: checked },
+        description,
+      );
+    }
+    return patchCheckbox(
+      { certificado_sanitario_enviar_a_firmar: checked },
+      { ...estado, enviarAFirmar: checked },
+      description,
+    );
+  };
+
   const openUploadModal = (etapa: "validado" | "sellado") => {
     if (!actions?.openIframeModal) {
       console.warn("[Cert] actions.openIframeModal no disponible");
@@ -198,7 +228,13 @@ const CertificadoStepper: React.FC<CertificadoStepperProps> = ({
     });
     actions.openIframeModal(
       {
-        uri: buildUploadModalUri(numeroPedido, companyId, tipoDocumento),
+        uri: buildUploadModalUri(
+          numeroPedido,
+          companyId,
+          tipoDocumento,
+          undefined,
+          destinoSubconjunto ? contenedorIdsDestino : undefined,
+        ),
         title: `Subir ${titulo} — ${etapa}`,
         width: 640,
         height: 520,
@@ -230,7 +266,14 @@ const CertificadoStepper: React.FC<CertificadoStepperProps> = ({
       return next;
     });
     try {
-      await deletePedidoFile(numeroPedido, companyId, archivo.file_id, tipoDocumento);
+      await deletePedidoFile(
+        numeroPedido,
+        companyId,
+        archivo.file_id,
+        tipoDocumento,
+        undefined,
+        destinoSubconjunto ? contenedorIdsDestino : undefined,
+      );
       await onUpdated();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -254,6 +297,13 @@ const CertificadoStepper: React.FC<CertificadoStepperProps> = ({
     <Tile>
       <Flex direction="column" gap="small">
         <Heading>{titulo}</Heading>
+
+        {destinoSubconjunto && (
+          <Alert title="Certificado del embarque seleccionado" variant="info">
+            Las subidas se replican a los {contenedorIdsDestino!.length} contenedores
+            seleccionados del embarque.
+          </Alert>
+        )}
 
         <StepIndicator
           stepNames={["Borrador a validar", "Validado por cliente", "Sellado y firmado"]}
@@ -284,24 +334,35 @@ const CertificadoStepper: React.FC<CertificadoStepperProps> = ({
           </Box>
 
           <Box flex={1}>
-            {etapa2EsAuto ? (
-              <FileRowReadonly
-                label="2. Validado por cliente (administración)"
-                archivo={estado.validado}
-                warningText={warningValidado}
-              />
-            ) : (
-              <FileRowEditable
-                label="2. Validado por cliente (administración)"
-                archivo={estado.validado}
-                deleting={!!estado.validado && deletingFileIds.has(estado.validado.file_id)}
-                uploading={uploadingDocs.has(tipoDocumentoFor(tipoCertificado, "validado"))}
-                onSubir={() => openUploadModal("validado")}
-                onBorrar={() => handleBorrar(estado.validado, "validado")}
-                disabled={!estado.validadoCliente}
-                disabledReason="Marca antes 'Validado por cliente'"
-              />
-            )}
+            <Flex direction="column" gap="small">
+              {etapa2EsAuto ? (
+                <FileRowReadonly
+                  label="2. Validado por cliente (administración)"
+                  archivo={estado.validado}
+                  warningText={warningValidado}
+                />
+              ) : (
+                <FileRowEditable
+                  label="2. Validado por cliente (administración)"
+                  archivo={estado.validado}
+                  deleting={!!estado.validado && deletingFileIds.has(estado.validado.file_id)}
+                  uploading={uploadingDocs.has(tipoDocumentoFor(tipoCertificado, "validado"))}
+                  onSubir={() => openUploadModal("validado")}
+                  onBorrar={() => handleBorrar(estado.validado, "validado")}
+                  disabled={!estado.validadoCliente}
+                  disabledReason="Marca antes 'Validado por cliente'"
+                />
+              )}
+              <Checkbox
+                checked={estado.enviarAFirmar}
+                onChange={handleToggleEnviarFirmar}
+                name={`${tipoCertificado}_enviar_a_firmar`}
+                description="Marcar para enviar el certificado validado a firmar."
+                readOnly={!tieneValidado}
+              >
+                Enviar a firmar
+              </Checkbox>
+            </Flex>
           </Box>
 
           <Box flex={1}>

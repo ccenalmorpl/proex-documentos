@@ -1,7 +1,6 @@
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from app.shared.hubspot_batch import batch_read_associations, batch_read_objects
@@ -44,6 +43,9 @@ from app.core.constants import (
     ROLLBACK_API_TO_INTERNAL_DOC_TYPE,
     DEAL_GENERATE_PROPERTIES,
     DOC_TYPE_LABELS_ES,
+    DEAL_PROP_PIPELINE,
+    PEDIDO_PIPELINE_ID,
+    DOCUMENTO_PIPELINE_ID,
 )
 from app.shared.hubspot_client import hubspot_client
 from app.shared.files import (
@@ -54,6 +56,7 @@ from app.shared.files import (
     upload_pdf,
 )
 from app.shared.properties import resolve_enum_label
+from app.shared.hubdb import get_formato_label_map
 from app.shared.elementos import get_elementos_fabricante_por_contenedor
 
 from app.core.config import settings
@@ -91,7 +94,6 @@ def _build_doc_info_for_container(properties: dict, doc_type: str, required: boo
 def _map_to_list_item(
     obj_id: str,
     properties: dict,
-    nombre_cliente: Optional[str] = None,
     deal_id: Optional[str] = None,
     deal_name: Optional[str] = None,
     deal_properties: Optional[dict] = None,
@@ -111,7 +113,6 @@ def _map_to_list_item(
     item = ContenedorListItem(
         id=obj_id,
         name=properties.get("nombre", ""),
-        nombre_cliente=nombre_cliente,
         etd=properties.get(CONTENEDOR_PROP_ETD),
         eta=properties.get(CONTENEDOR_PROP_ETA),
         deal_id=deal_id or None,
@@ -121,18 +122,32 @@ def _map_to_list_item(
     )
     logger.debug(
         f"  [MapItem] id={obj_id} name={item.name!r} "
-        f"nombre_cliente={item.nombre_cliente!r} "
         f"deal_id={item.deal_id!r} deal_name={item.deal_name!r} "
         f"etd={item.etd!r} eta={item.eta!r} "
         f"docs={[{'doc_type': d.doc_type, 'required': d.required, 'generated': d.generated} for d in item.docs]}"
     )
     return item
 
+def _pick_cotizacion_deal(deal_ids: List[str], deal_data_by_id: dict) -> Tuple[str, dict]:
+    """Elige el Negocio Cotización padre entre los deals asociados al contenedor:
+    el deal cuyo pipeline NO es el de Pedidos ni el de Documentación. Si ninguno lo
+    es, devuelve vacío: nunca se muestra el pedido ni la documentación como 'Negocio'."""
+    for did in deal_ids:
+        props = deal_data_by_id.get(did) or {}
+        pipeline = props.get(DEAL_PROP_PIPELINE)
+        if pipeline not in (PEDIDO_PIPELINE_ID, DOCUMENTO_PIPELINE_ID):
+            return did, props
+    return "", {}
+
+
 def _get_deal_info_for_containers(
     client,
     container_ids: List[str],
 ) -> dict:
-    """Obtiene (deal_id, deal_name, deal_properties) para cada contenedor. Fallo silencioso por contenedor: si no tiene Deal asociado devuelve ("", "", {})."""
+    """Obtiene (deal_id, deal_name, deal_properties) del Negocio Cotización padre de
+    cada contenedor. Un contenedor puede estar asociado a cotización + pedido +
+    documentación; la columna 'Negocio' y las props de cabecera se toman SIEMPRE de
+    la cotización. Fallo silencioso: si no tiene Deal asociado devuelve ("", "", {})."""
     if not container_ids:
         return {}
 
@@ -142,39 +157,31 @@ def _get_deal_info_for_containers(
     )
     logger.info(f"[TIMER] _get_deal_info.batch_assoc: {time.monotonic() - t:.2f}s")
 
-    container_deal_id: dict = {
-        cid: (deals[0] if deals else "")
-        for cid, deals in contenedor_to_deals.items()
-    }
-
-    unique_deal_ids = [did for did in set(container_deal_id.values()) if did]
+    # Leemos TODOS los deals asociados (no solo el primero) para poder distinguir la
+    # cotización de pedido/documentación por pipeline.
+    all_deal_ids = list({did for deals in contenedor_to_deals.values() for did in deals})
     t = time.monotonic()
     deal_data_by_id = batch_read_objects(
         client,
         OBJECT_TYPE_DEAL,
-        unique_deal_ids,
-        ["dealname", "certificado_origen_mercancia", "observaciones", "preprints_language"],
+        all_deal_ids,
+        ["dealname", DEAL_PROP_PIPELINE, "certificado_origen_mercancia", "observaciones", "preprints_language"],
     )
     logger.info(f"[TIMER] _get_deal_info.batch_deals: {time.monotonic() - t:.2f}s")
 
-    return {
-        cid: (
-            container_deal_id.get(cid, ""),
-            (deal_data_by_id.get(container_deal_id.get(cid, "")) or {}).get("dealname", "") or "",
+    result: dict = {}
+    for cid in container_ids:
+        cot_id, cot_props = _pick_cotizacion_deal(contenedor_to_deals.get(cid, []), deal_data_by_id)
+        result[cid] = (
+            cot_id or "",
+            (cot_props.get("dealname") or ""),
             {
-                "certificado_origen_mercancia": (deal_data_by_id.get(container_deal_id.get(cid, "")) or {}).get(
-                    "certificado_origen_mercancia", "",
-                ) or "",
-                "observaciones": (deal_data_by_id.get(container_deal_id.get(cid, "")) or {}).get(
-                    "observaciones", "",
-                ) or "",
-                "preprints_language": (deal_data_by_id.get(container_deal_id.get(cid, "")) or {}).get(
-                    "preprints_language", "",
-                ) or "",
+                "certificado_origen_mercancia": (cot_props.get("certificado_origen_mercancia") or ""),
+                "observaciones": (cot_props.get("observaciones") or ""),
+                "preprints_language": (cot_props.get("preprints_language") or ""),
             },
         )
-        for cid in container_ids
-    }
+    return result
 
 def _clear_doc_properties(doc_type: str) -> dict:
     """Devuelve un dict de propiedades con valores vacíos para limpiar un tipo de doc."""
@@ -300,95 +307,6 @@ def _batch_update_contenedores(client, container_ids: List[str], properties: dic
 
     return {"updated": updated, "failed": failed, "total_requested": len(container_ids)}
 
-def _date_str_to_ms(date_str: str) -> int:
-    """Convierte YYYY-MM-DD a milisegundos epoch UTC."""
-    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    ms = int(dt.timestamp() * 1000)
-    logger.debug(f"  [DateConv] {date_str!r} → {ms} ms")
-    return ms
-
-def _build_search_filters(filtros) -> List[Filter]:
-    """Construye la lista de Filter objects para la HubSpot Search API."""
-    filters: List[Filter] = []
-
-    if filtros.empresa:
-        filters.append(Filter(
-            property_name="nombre_cliente",
-            operator="CONTAINS_TOKEN",
-            value=filtros.empresa,
-        ))
-        logger.info(f"  [Filter] empresa CONTAINS_TOKEN={filtros.empresa!r}")
-
-    if filtros.etd_desde:
-        ms = _date_str_to_ms(filtros.etd_desde)
-        filters.append(Filter(property_name=CONTENEDOR_PROP_ETD, operator="GTE", value=str(ms)))
-        logger.info(f"  [Filter] etd GTE {filtros.etd_desde!r} ({ms}ms)")
-    if filtros.etd_hasta:
-        ms = _date_str_to_ms(filtros.etd_hasta)
-        filters.append(Filter(property_name=CONTENEDOR_PROP_ETD, operator="LTE", value=str(ms)))
-        logger.info(f"  [Filter] etd LTE {filtros.etd_hasta!r} ({ms}ms)")
-
-    if filtros.eta_desde:
-        ms = _date_str_to_ms(filtros.eta_desde)
-        filters.append(Filter(property_name=CONTENEDOR_PROP_ETA, operator="GTE", value=str(ms)))
-        logger.info(f"  [Filter] eta GTE {filtros.eta_desde!r} ({ms}ms)")
-    if filtros.eta_hasta:
-        ms = _date_str_to_ms(filtros.eta_hasta)
-        filters.append(Filter(property_name=CONTENEDOR_PROP_ETA, operator="LTE", value=str(ms)))
-        logger.info(f"  [Filter] eta LTE {filtros.eta_hasta!r} ({ms}ms)")
-
-    logger.info(f"  [Filters] total={len(filters)} filtros construidos")
-    return filters
-
-def _search_contenedores(client, filters: List[Filter]) -> dict:
-    """Ejecuta la búsqueda en HubSpot con paginación completa."""
-    result: dict = {}
-    after: Optional[str] = None
-    page_num = 0
-
-    while True:
-        page_num += 1
-
-        filter_groups = [FilterGroup(filters=filters)] if filters else []
-        search_request = PublicObjectSearchRequest(
-            filter_groups=filter_groups,
-            properties=CONTENEDOR_ALL_PROPERTIES,
-            limit=100,
-            after=after,
-        )
-
-        logger.info(
-            f"  [Search] página={page_num} after={after!r} "
-            f"object_type={OBJECT_TYPE_CONTENEDOR} "
-            f"filter_groups={len(filter_groups)} "
-            f"properties_count={len(CONTENEDOR_ALL_PROPERTIES)}"
-        )
-        logger.debug(f"  [Search] filter_groups={filter_groups} properties={CONTENEDOR_ALL_PROPERTIES}")
-
-        resp = client.crm.objects.search_api.do_search(
-            object_type=OBJECT_TYPE_CONTENEDOR,
-            public_object_search_request=search_request,
-        )
-
-        page_results = resp.results or []
-        logger.info(
-            f"  [Search] página={page_num} → {len(page_results)} resultados "
-            f"(total acumulado: {len(result) + len(page_results)})"
-        )
-
-        for obj in page_results:
-            logger.debug(f"    [Obj] id={obj.id} props={list(obj.properties.keys())}")
-            result[obj.id] = obj.properties
-
-        if resp.paging and resp.paging.next:
-            after = resp.paging.next.after
-            logger.info(f"  [Search] hay más páginas, continuando con after={after!r}")
-        else:
-            logger.info(f"  [Search] paginación completa. Total={len(result)} contenedores.")
-            break
-
-    return result
-
 def _search_companies_by_name(client, empresa: str) -> List[tuple]:
     """Busca empresas cuyo nombre contenga 'empresa'. Devuelve lista de (company_id, company_name)."""
     from app.empresas.service import _search_companies_by_name as _search
@@ -399,6 +317,13 @@ def _search_companies_by_name(client, empresa: str) -> List[tuple]:
         f"{len(results)} encontradas | sample={results[:3]}"
     )
     return results
+
+def _resolve_company_ids(client, company_id: str, empresa: str) -> List[str]:
+    """IDs de las empresas objetivo. Prioriza el company_id exacto del contexto (una
+    sola empresa); si no viene, cae a la búsqueda difusa por nombre (legacy)."""
+    if company_id:
+        return [company_id]
+    return [cid for cid, _ in _search_companies_by_name(client, empresa)]
 
 def _get_contenedores_for_companies(client, company_ids: List[str]) -> dict:
     """Devuelve {contenedor_id: company_id} para todas las empresas dadas. Si un contenedor está asociado a varias empresas, prevalece la última vista."""
@@ -509,46 +434,6 @@ def _is_doc_generated(doc_type: str, properties: dict) -> bool:
         return False
     return bool(properties.get(file_prop))
 
-def _filter_by_date(
-    contenedores: dict,
-    prop_name: str,
-    desde: Optional[str],
-    hasta: Optional[str],
-) -> tuple:
-    """Filtra en memoria por rango de fecha sobre una propiedad del contenedor. Si no hay valor, se incluye."""
-    if not desde and not hasta:
-        return contenedores, 0
-
-    filtered: dict = {}
-    discarded = 0
-
-    for cid, props in contenedores.items():
-        raw = props.get(prop_name)
-        if not raw:
-            filtered[cid] = props
-            continue
-
-        date_str = str(raw).strip()[:10]
-
-        if desde and date_str < desde:
-            discarded += 1
-            logger.debug(
-                f"  [DateFilter] id={cid} {prop_name}={date_str} "
-                f"< desde={desde} → descartado"
-            )
-            continue
-        if hasta and date_str > hasta:
-            discarded += 1
-            logger.debug(
-                f"  [DateFilter] id={cid} {prop_name}={date_str} "
-                f"> hasta={hasta} → descartado"
-            )
-            continue
-
-        filtered[cid] = props
-
-    return filtered, discarded
-
 def _filter_by_generated_docs(contenedores: dict, tipos: List[str]) -> tuple:
     """Mantiene solo contenedores que tienen al menos un doc generado en los tipos dados."""
     filtered: dict = {}
@@ -580,14 +465,15 @@ def _filter_by_generated_docs(contenedores: dict, tipos: List[str]) -> tuple:
 async def get_pending_containers(request: PendingRequest) -> PendingResponse:
     """Devuelve contenedores con documentos pendientes según los filtros del request."""
     filtros = request.filtros
+    company_id = (filtros.company_id or "").strip()
     empresa = (filtros.empresa or "").strip()
     tipos = filtros.tipos_documento or []
 
-    if not empresa:
-        logger.warning("[pending_containers] empresa requerida pero vacía")
+    if not company_id and not empresa:
+        logger.warning("[pending_containers] company_id/empresa requerido pero vacío")
         return PendingResponse(
             success=False,
-            error="El filtro 'empresa' es obligatorio.",
+            error="Falta la empresa del contexto (company_id).",
         )
 
     if not tipos:
@@ -597,53 +483,30 @@ async def get_pending_containers(request: PendingRequest) -> PendingResponse:
             error="El filtro 'tipos_documento' es obligatorio.",
         )
 
-    if (filtros.etd_desde and filtros.etd_hasta
-            and filtros.etd_desde > filtros.etd_hasta):
-        return PendingResponse(
-            success=False,
-            error="etd_desde no puede ser mayor que etd_hasta.",
-        )
-
-    if (filtros.eta_desde and filtros.eta_hasta
-            and filtros.eta_desde > filtros.eta_hasta):
-        return PendingResponse(
-            success=False,
-            error="eta_desde no puede ser mayor que eta_hasta.",
-        )
-
     logger.info(
         f"[pending_containers] filtros normalizados: "
-        f"empresa={empresa!r} tipos={tipos} "
-        f"etd=[{filtros.etd_desde}, {filtros.etd_hasta}] "
-        f"eta=[{filtros.eta_desde}, {filtros.eta_hasta}]"
+        f"company_id={company_id!r} empresa={empresa!r} tipos={tipos}"
     )
 
     try:
         client = hubspot_client.get_client()
 
-        companies = _search_companies_by_name(client, empresa)
-        company_ids = [cid for cid, _ in companies]
-        company_name_by_id = {cid: cname for cid, cname in companies}
+        company_ids = _resolve_company_ids(client, company_id, empresa)
 
         logger.info(
             f"[pending_containers]{len(company_ids)} empresa(s) "
-            f"→ sample={companies[:3]}"
+            f"→ sample={company_ids[:3]}"
         )
 
         if not company_ids:
             logger.info(
-                f"[pending_containers] sin empresas con nombre que contenga "
-                f"{empresa!r} → respuesta vacía"
+                f"[pending_containers] sin empresas (company_id={company_id!r} "
+                f"empresa={empresa!r}) → respuesta vacía"
             )
             return PendingResponse(success=True, contenedores=[], total=0)
 
         contenedor_to_company = _get_contenedores_for_companies(client, company_ids)
         contenedor_ids_set = set(contenedor_to_company.keys())
-
-        contenedor_company_name = {
-            cid: company_name_by_id.get(co_id, "")
-            for cid, co_id in contenedor_to_company.items()
-        }
 
         logger.info(
             f"[pending_containers]{len(contenedor_ids_set)} contenedor(es) "
@@ -721,33 +584,10 @@ async def get_pending_containers(request: PendingRequest) -> PendingResponse:
         if not filtered:
             return PendingResponse(success=True, contenedores=[], total=0)
 
-        filtered, descartados_5 = _filter_by_date(
-            filtered,
-            CONTENEDOR_PROP_ETD,
-            filtros.etd_desde,
-            filtros.etd_hasta,
-        )
-        logger.info(
-            f"[pending_containers] post-etd: {len(filtered)} "
-            f"({descartados_5} descartados)"
-        )
-
-        filtered, descartados_6 = _filter_by_date(
-            filtered,
-            CONTENEDOR_PROP_ETA,
-            filtros.eta_desde,
-            filtros.eta_hasta,
-        )
-        logger.info(
-            f"[pending_containers] post-eta: {len(filtered)} "
-            f"({descartados_6} descartados)"
-        )
-
         deal_info = _get_deal_info_for_containers(client, list(filtered.keys()))
         contenedores: List[ContenedorListItem] = [
             _map_to_list_item(
                 cid, props,
-                nombre_cliente=contenedor_company_name.get(cid),
                 deal_id=deal_info.get(cid, ("", "", {}))[0] or None,
                 deal_name=deal_info.get(cid, ("", "", {}))[1] or None,
                 deal_properties=deal_info.get(cid, ("", "", {}))[2] or None,
@@ -872,11 +712,13 @@ async def generate_documents(request: GenerateRequest) -> GenerateResponse:
 
         _, deal_props = _get_deal_for_contenedores(client, request.container_ids)
 
+        formato_labels: dict = {}
         if DOC_TYPE_SANITARIO in set(request.doc_types):
             deal_props = dict(deal_props)
             deal_props["puerto_destino"] = resolve_enum_label(
                 client, "deals", "puerto_destino", deal_props.get("puerto_destino", "")
             )
+            formato_labels = get_formato_label_map(request.idioma)
 
         elementos_by_container = get_elementos_fabricante_por_contenedor(
             client, request.container_ids
@@ -918,6 +760,7 @@ async def generate_documents(request: GenerateRequest) -> GenerateResponse:
                     elementos_by_container,
                     settings,
                     idioma=request.idioma,
+                    formato_labels=formato_labels,
                 )
             else:
                 logger.warning(f"doc_type desconocido ignorado: {doc_type!r}")
@@ -1066,54 +909,35 @@ async def generate_documents(request: GenerateRequest) -> GenerateResponse:
 async def get_generated_containers(request: GeneratedRequest) -> GeneratedResponse:
     """Devuelve contenedores con al menos un tipo de doc generado (Tab 2)."""
     filtros = request.filtros
+    company_id = (filtros.company_id or "").strip()
     empresa = (filtros.empresa or "").strip()
     tipos = filtros.tipos_documento or ALL_DOC_TYPES
 
     logger.info(
         f"[get_generated_containers] START "
         f"deal_id={request.deal_id!r} "
+        f"company_id={company_id!r} "
         f"empresa={empresa!r} "
         f"tipos_documento={tipos}"
     )
 
-    if not empresa:
-        logger.warning("[get_generated_containers] empresa requerida pero vacía")
+    if not company_id and not empresa:
+        logger.warning("[get_generated_containers] company_id/empresa requerido pero vacío")
         return GeneratedResponse(
             success=False,
-            error="El filtro 'empresa' es obligatorio.",
-        )
-
-    if (filtros.etd_desde and filtros.etd_hasta
-            and filtros.etd_desde > filtros.etd_hasta):
-        return GeneratedResponse(
-            success=False,
-            error="etd_desde no puede ser mayor que etd_hasta.",
-        )
-
-    if (filtros.eta_desde and filtros.eta_hasta
-            and filtros.eta_desde > filtros.eta_hasta):
-        return GeneratedResponse(
-            success=False,
-            error="eta_desde no puede ser mayor que eta_hasta.",
+            error="Falta la empresa del contexto (company_id).",
         )
 
     try:
         client = hubspot_client.get_client()
 
-        companies = _search_companies_by_name(client, empresa)
-        company_ids = [cid for cid, _ in companies]
-        company_name_by_id = {cid: cname for cid, cname in companies}
+        company_ids = _resolve_company_ids(client, company_id, empresa)
 
         if not company_ids:
             return GeneratedResponse(success=True, contenedores=[], total=0)
 
         contenedor_to_company = _get_contenedores_for_companies(client, company_ids)
         contenedor_ids_set = set(contenedor_to_company.keys())
-
-        contenedor_company_name = {
-            cid: company_name_by_id.get(co_id, "")
-            for cid, co_id in contenedor_to_company.items()
-        }
 
         if not contenedor_ids_set:
             return GeneratedResponse(success=True, contenedores=[], total=0)
@@ -1131,27 +955,13 @@ async def get_generated_containers(request: GeneratedRequest) -> GeneratedRespon
         if not filtered:
             return GeneratedResponse(success=True, contenedores=[], total=0)
 
-        filtered, descartados_5 = _filter_by_date(
-            filtered,
-            CONTENEDOR_PROP_ETD,
-            filtros.etd_desde,
-            filtros.etd_hasta,
-        )
-
-        filtered, descartados_6 = _filter_by_date(
-            filtered,
-            CONTENEDOR_PROP_ETA,
-            filtros.eta_desde,
-            filtros.eta_hasta,
-        )
-
         deal_info = _get_deal_info_for_containers(client, list(filtered.keys()))
         contenedores = [
             _map_to_list_item(
                 cid, props,
-                nombre_cliente=contenedor_company_name.get(cid),
-                deal_id=deal_info.get(cid, ("", ""))[0] or None,
-                deal_name=deal_info.get(cid, ("", ""))[1] or None,
+                deal_id=deal_info.get(cid, ("", "", {}))[0] or None,
+                deal_name=deal_info.get(cid, ("", "", {}))[1] or None,
+                deal_properties=deal_info.get(cid, ("", "", {}))[2] or None,
             )
             for cid, props in filtered.items()
         ]

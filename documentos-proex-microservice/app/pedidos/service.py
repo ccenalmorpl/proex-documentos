@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
@@ -26,15 +27,17 @@ from app.core.constants import (
     CONTENEDOR_PROP_CERT_ORIGEN,
     CONTENEDOR_PROP_CERT_ORIGEN_BORRADOR,
     CONTENEDOR_PROP_CERT_ORIGEN_VALIDADO,
+    CONTENEDOR_PROP_CERT_ORIGEN_ENVIAR_FIRMAR,
+    CONTENEDOR_PROP_CERT_SANITARIO_ENVIAR_FIRMAR,
     CONTENEDOR_PROP_CERT_SANITARIO,
     CONTENEDOR_PROP_CERT_SANITARIO_VALIDADO,
     CONTENEDOR_PROP_DOCUMENTACION_RECIBIDA,
     CONTENEDOR_PROP_DOCUMENTOS,
     CONTENEDOR_PROP_ENVIAR_POR_MENSAJERIA,
-    CONTENEDOR_PROP_ETA,
-    CONTENEDOR_PROP_ETD,
     CONTENEDOR_PROP_FECHA_LLEGADA_CONTENEDOR,
     CONTENEDOR_PROP_FECHA_RETIRADA_MERCANCIA,
+    CONTENEDOR_PROP_DATOS_ENVIO_MENSAJERIA,
+    CONTENEDOR_PROP_ALBARAN_MENSAJERIA,
     CONTENEDOR_PROP_FOTOS_DE_CARGA,
     CONTENEDOR_PROP_MERCANCIA_RETIRADA,
     CONTENEDOR_PROP_OTROS_DOCUMENTOS,
@@ -48,6 +51,7 @@ from app.core.constants import (
     COTIZACION_ALMACEN_PROEX_SAN_ROQUE,
     COTIZACION_PROP_ALMACEN,
     COTIZACION_PROP_COMENTARIOS_LOGISTICA,
+    COTIZACION_PROP_TIPO_DE_VENTA,
     COTIZACION_PROP_CONSIGNEE,
     COTIZACION_PROP_LOCALIDAD_DESTINO,
     COTIZACION_PROP_LUGAR_CARGA,
@@ -57,11 +61,15 @@ from app.core.constants import (
     DEAL_PROP_DATOS_DEL_CHOFER,
     DEAL_PROP_DIRECCION_DE_ENTREGA,
     DEAL_PROP_FECHA_DE_ENTREGA,
+    DEAL_PROP_TRANSITARIO_DEL_PEDIDO,
+    DEAL_PROP_TRANSITARIO_TERRESTRE_DEL_PEDIDO,
     DEAL_DETALLE_PROPERTIES,
     DEAL_PROP_BL_VALIDADO_ADMINISTRACION,
     DEAL_PROP_BL_VALIDADO_LOGISTICA,
     DEAL_PROP_BL_ENVIADO_CLIENTE,
     DEAL_PROP_BORRADOR_BL,
+    DEAL_PROP_NUMERO_DE_BOOKING,
+    DEAL_PROP_CAMBIOS_EN_BL,
     DEAL_PROP_CARTA_DE_PORTE_PROEX,
     DEAL_PROP_DESCRIPCION_MERCANCIA,
     DEAL_PROP_ETA,
@@ -69,6 +77,7 @@ from app.core.constants import (
     DEAL_PROP_FACTURA_DEL_PEDIDO,
     DEAL_PROP_FECHA_FACTURACION_PEDIDO,
     DEAL_PROP_FECHA_VENCIMIENTO_FACTURA,
+    DEAL_PROP_NUMERO_DE_FACTURA,
     DEAL_PROP_FOTOS_DE_CARGA,
     DEAL_PROP_NUMERO_DE_PEDIDO,
     DEAL_PROP_OBSERVACIONES,
@@ -81,9 +90,12 @@ from app.core.constants import (
     OBJECT_TYPE_DEAL,
     OBJECT_TYPE_PROVEEDOR,
     PEDIDO_PIPELINE_ID,
-    TIPO_FLUJO_EXPORTACION,
-    TIPO_FLUJO_NACIONAL,
-    TIPO_FLUJO_NACIONAL_SAN_ROQUE,
+    DOCUMENTO_PIPELINE_ID,
+    CAMION_TIPO_CONTENEDOR,
+    TIPO_FLUJO_CAMION,
+    TIPO_FLUJO_CAMION_SAN_ROQUE,
+    TIPO_FLUJO_CONTENEDOR,
+    TIPO_FLUJO_CONTENEDOR_SAN_ROQUE,
 )
 from app.pedidos.schemas import (
     ArchivoSimple,
@@ -100,7 +112,10 @@ from app.pedidos.schemas import (
     PedidoInfo,
     PedidosListaResponse,
     SelectOption,
+    UpdateContenedorBookingRequest,
+    UpdateContenedorDatosRequest,
     UpdateContenedorEntregaRequest,
+    UpdateContenedorFechasRequest,
     UpdateContenedoresCertificadosRequest,
     UpdatePedidoBLRequest,
     UpdatePedidoResponse,
@@ -422,23 +437,43 @@ def _verify_pedido_belongs_to_company(
 
 def _classify_deals(
     deal_ids: List[str], deal_props_by_id: Dict[str, dict],
-) -> Tuple[Optional[Tuple[str, dict]], Optional[Tuple[str, dict]]]:
+) -> Tuple[
+    Optional[Tuple[str, dict]],
+    Optional[Tuple[str, dict]],
+    Optional[Tuple[str, dict]],
+]:
+    """Separa los deals del contenedor en (cotización, pedido, documento) por
+    pipeline. El Negocio Documento (905179456) es el tercer tipo; sin esta rama
+    se colaría como cotización y contaminaría sus props."""
     cotizacion: Optional[Tuple[str, dict]] = None
     pedido: Optional[Tuple[str, dict]] = None
+    documento: Optional[Tuple[str, dict]] = None
 
     for did in deal_ids:
         props = deal_props_by_id.get(did) or {}
         numero = (props.get(DEAL_PROP_NUMERO_DE_PEDIDO) or "").strip()
         pipeline = props.get(DEAL_PROP_PIPELINE)
 
-        if pipeline == PEDIDO_PIPELINE_ID and numero:
+        if pipeline == DOCUMENTO_PIPELINE_ID:
+            if documento is None:
+                documento = (did, props)
+        elif pipeline == PEDIDO_PIPELINE_ID and numero:
             if pedido is None:
                 pedido = (did, props)
         else:
             if cotizacion is None:
                 cotizacion = (did, props)
 
-    return cotizacion, pedido
+    return cotizacion, pedido, documento
+
+
+def _doc_first(documento_props: dict, pedido_props: dict, key: str) -> str:
+    """Lee una prop de deal con el Negocio Documento como fuente de verdad y
+    fallback al Negocio Pedido (para pedidos legados sin valor en el Documento)."""
+    val = (documento_props.get(key) or "").strip()
+    if val:
+        return val
+    return (pedido_props.get(key) or "").strip()
 
 
 def _read_company_props(client, company_id: str) -> dict:
@@ -453,19 +488,52 @@ def _read_company_props(client, company_id: str) -> dict:
         return {}
 
 
-def _compute_tipo_flujo(
-    tipo_cliente: Optional[str], almacen: Optional[str],
-) -> Optional[str]:
-    tipo = (tipo_cliente or "").strip().lower()
-    almacen_norm = (almacen or "").strip()
+FLUJOS_CONTENEDOR = {TIPO_FLUJO_CONTENEDOR, TIPO_FLUJO_CONTENEDOR_SAN_ROQUE}
+FLUJOS_SAN_ROQUE = {TIPO_FLUJO_CONTENEDOR_SAN_ROQUE, TIPO_FLUJO_CAMION_SAN_ROQUE}
 
-    if tipo == TIPO_FLUJO_NACIONAL:
-        if almacen_norm == COTIZACION_ALMACEN_PROEX_SAN_ROQUE:
-            return TIPO_FLUJO_NACIONAL_SAN_ROQUE
-        return TIPO_FLUJO_NACIONAL
-    if tipo == TIPO_FLUJO_EXPORTACION:
-        return TIPO_FLUJO_EXPORTACION
-    return None
+
+def _normalize_tipo_contenedor(raw: Optional[str]) -> str:
+    # Quita todo lo no alfanumérico (espacios, guiones bajos, guiones) para que
+    # "trailer_80", "TRAILER 80" y "TRAILER80" matcheen la allowlist por igual.
+    return re.sub(r"[^A-Z0-9]", "", (raw or "").strip().upper())
+
+
+def _es_camion(tipo_contenedor_raw: Optional[str]) -> bool:
+    return _normalize_tipo_contenedor(tipo_contenedor_raw) in CAMION_TIPO_CONTENEDOR
+
+
+def _compute_tipo_flujo(
+    tipo_contenedor_raw: Optional[str], almacen: Optional[str],
+) -> str:
+    """Cruza transporte (tipo_contenedor) con origen (almacen). El tipo de
+    cliente ya no interviene en la apariencia."""
+    san_roque = (almacen or "").strip() == COTIZACION_ALMACEN_PROEX_SAN_ROQUE
+    if _es_camion(tipo_contenedor_raw):
+        return TIPO_FLUJO_CAMION_SAN_ROQUE if san_roque else TIPO_FLUJO_CAMION
+    return TIPO_FLUJO_CONTENEDOR_SAN_ROQUE if san_roque else TIPO_FLUJO_CONTENEDOR
+
+
+def _tipo_contenedor_representativo(
+    contenedores_props: Dict[str, dict],
+    contenedor_ids,
+    contexto: str = "",
+) -> Optional[str]:
+    """tipo_contenedor crudo representativo del expediente (transporte uniforme).
+    Si los contenedores divergen en camión/contenedor, logea warning y toma el
+    primero — "todo camión o todo contenedor" es regla de negocio (de momento)."""
+    raws = [
+        ((contenedores_props.get(cid, {}) or {}).get(CONTENEDOR_PROP_TIPO_CONTENEDOR) or "").strip()
+        for cid in contenedor_ids
+    ]
+    raws = [r for r in raws if r]
+    if not raws:
+        return None
+    if len({_es_camion(r) for r in raws}) > 1:
+        logger.warning(
+            f"[transporte]{contexto} contenedores con transporte mixto "
+            f"(camión y contenedor en el mismo pedido): {raws!r}; se toma el primero"
+        )
+    return raws[0]
 
 
 def _to_float(raw) -> Optional[float]:
@@ -532,6 +600,24 @@ def _build_contenedor_item(
     props: dict,
     tipo_contenedor_labels: Dict[str, str],
     descripcion_mercancia_agregada: Optional[str] = None,
+    numero_de_factura: Optional[str] = None,
+    fecha_de_vencimiento_factura: Optional[str] = None,
+    numero_de_booking: Optional[str] = None,
+    etd: Optional[str] = None,
+    eta: Optional[str] = None,
+    transitario: Optional[str] = None,
+    transitario_terrestre: Optional[str] = None,
+    factura_pedido: Optional[DealFile] = None,
+    packing_list_pedido: Optional[DealFile] = None,
+    carta_porte_pedido: Optional[DealFile] = None,
+    bl_validado_logistica: bool = False,
+    bl_validado_administracion: bool = False,
+    bl_enviado_cliente: bool = False,
+    tipo_de_bl: Optional[str] = None,
+    cambios_en_bl: Optional[str] = None,
+    bl_archivos: Optional[List[BLArchivo]] = None,
+    tiene_negocio_documento: bool = False,
+    documento_dealstage: Optional[str] = None,
 ) -> ContenedorDetalleItem:
     peso_bruto = props.get("peso_bruto")
     tara = props.get("tara")
@@ -548,10 +634,15 @@ def _build_contenedor_item(
         peso_neto=props.get("peso_neto"),
         tara=tara,
         vgm=_compute_vgm(peso_bruto, tara),
-        etd=props.get(CONTENEDOR_PROP_ETD),
-        eta=props.get(CONTENEDOR_PROP_ETA),
+        # ETD/ETA del pedido-deal del contenedor (fuente autoritativa que gestiona
+        # Pedidos, per-contenedor), no del objeto Contenedor. Normalizadas a ISO
+        # "YYYY-MM-DD" para que el DateInput de la card las precargue.
+        etd=_iso_from_hubspot_date(etd),
+        eta=_iso_from_hubspot_date(eta),
         tipo_contenedor=tipo_label,
         total_cajas=props.get("total_cajas"),
+        transitario=(transitario or None),
+        transitario_terrestre=(transitario_terrestre or None),
         descripcion_mercancia_agregada=descripcion_mercancia_agregada,
         documentos_a_generar=_parse_documentos_a_generar(props.get("documentos_a_generar")),
         importe_pendiente_cobro=props.get("importe_pendiente_cobro"),
@@ -566,6 +657,24 @@ def _build_contenedor_item(
         waiver_validado=_parse_bool(props.get(CONTENEDOR_PROP_WAIVER_VALIDADO)),
         fecha_llegada_contenedor=_iso_from_hubspot_date(fecha_llegada),
         fecha_retirada_mercancia=_iso_from_hubspot_date(fecha_retirada),
+        datos_envio_mensajeria=(props.get(CONTENEDOR_PROP_DATOS_ENVIO_MENSAJERIA) or None),
+        albaran_mensajeria=next(
+            iter(_build_archivos_simples(props.get(CONTENEDOR_PROP_ALBARAN_MENSAJERIA))), None
+        ),
+        numero_de_factura=(numero_de_factura or None),
+        fecha_de_vencimiento_factura=(fecha_de_vencimiento_factura or None),
+        numero_de_booking=(numero_de_booking or None),
+        factura_pedido=factura_pedido,
+        packing_list_pedido=packing_list_pedido,
+        carta_porte_pedido=carta_porte_pedido,
+        bl_validado_logistica=bl_validado_logistica,
+        bl_validado_administracion=bl_validado_administracion,
+        bl_enviado_cliente=bl_enviado_cliente,
+        tipo_de_bl=(tipo_de_bl or None),
+        cambios_en_bl=(cambios_en_bl or None),
+        bl_archivos=(bl_archivos or []),
+        tiene_negocio_documento=tiene_negocio_documento,
+        documento_dealstage=documento_dealstage,
     )
 
 
@@ -589,6 +698,7 @@ def _build_bl_archivos(borrador_bl_raw: Optional[str]) -> List[BLArchivo]:
             name=meta.name,
             url=meta.url,
             tipo=_classify_bl_file_by_name(meta.name),
+            created_at=_iso_from_hubspot_date(meta.created_at),
         ))
     return archivos
 
@@ -615,6 +725,7 @@ def _build_cert_archivos(raw: Optional[str], family: str) -> List[CertificadoArc
             name=meta.name,
             url=meta.url,
             tipo=_classify_cert_file_by_name(meta.name, family),
+            created_at=_iso_from_hubspot_date(meta.created_at),
         ))
     return archivos
 
@@ -649,6 +760,7 @@ def _build_documentos_archivos(raw: Optional[str]) -> List[OtroDocArchivo]:
             name=meta.name,
             url=meta.url,
             tipo=_classify_documentos_file_by_name(meta.name),
+            created_at=_iso_from_hubspot_date(meta.created_at),
         ))
     return archivos
 
@@ -664,25 +776,67 @@ def _build_archivos_simples(raw: Optional[str]) -> List[ArchivoSimple]:
             file_id=meta.file_id,
             name=meta.name,
             url=meta.url,
+            created_at=_iso_from_hubspot_date(meta.created_at),
         ))
     return archivos
 
 
-def _build_deal_file(raw: Optional[str]) -> Optional[DealFile]:
+def _build_deal_file(raw: Optional[str], meta_cache: Optional[dict] = None) -> Optional[DealFile]:
     ids = parse_file_ids(raw)
     if not ids:
         return None
     file_id = ids[0]
-    meta = fetch_file_metadata(file_id)
+    # Caché por request: el mismo file_id (factura/packing/carta) se repite entre
+    # los N pedido-deals/contenedores; se resuelve la metadata una sola vez.
+    if meta_cache is not None and file_id in meta_cache:
+        meta = meta_cache[file_id]
+    else:
+        meta = fetch_file_metadata(file_id)
+        if meta_cache is not None:
+            meta_cache[file_id] = meta
     if meta is None:
         return DealFile(file_id=file_id, name=None, url=None)
     return DealFile(file_id=meta.file_id, name=meta.name, url=meta.url)
+
+
+def _merge_cert_props(
+    contenedores_props: Dict[str, dict], contenedor_ids: List[str],
+) -> dict:
+    """Certificados a nivel de pedido: la cabecera agrega los ficheros de TODOS los
+    contenedores (dedup por file_id), no de un contenedor 'muestra' arbitrario. Así,
+    un certificado subido a un subconjunto del embarque (validado/sellado) aparece
+    igual aunque el contenedor muestra no lo tenga. Los flags 'validado' se OR-ean."""
+    file_props = [
+        CONTENEDOR_PROP_CERT_ORIGEN_BORRADOR,
+        CONTENEDOR_PROP_CERT_ORIGEN,
+        CONTENEDOR_PROP_CERT_SANITARIO,
+    ]
+    merged: dict = {}
+    for prop in file_props:
+        seen: List[str] = []
+        for cid in contenedor_ids:
+            for fid in parse_file_ids((contenedores_props.get(cid, {}) or {}).get(prop)):
+                if fid not in seen:
+                    seen.append(fid)
+        merged[prop] = serialize_file_ids(seen)
+    for prop in (
+        CONTENEDOR_PROP_CERT_ORIGEN_VALIDADO,
+        CONTENEDOR_PROP_CERT_SANITARIO_VALIDADO,
+        CONTENEDOR_PROP_CERT_ORIGEN_ENVIAR_FIRMAR,
+        CONTENEDOR_PROP_CERT_SANITARIO_ENVIAR_FIRMAR,
+    ):
+        merged[prop] = "true" if any(
+            _parse_bool((contenedores_props.get(cid, {}) or {}).get(prop))
+            for cid in contenedor_ids
+        ) else "false"
+    return merged
 
 
 def _build_pedido_info(
     pedido_props: dict,
     cotizacion_props: dict,
     contenedor_sample_props: dict,
+    meta_cache: Optional[dict] = None,
 ) -> PedidoInfo:
     cert_origen_borrador_raw = contenedor_sample_props.get(CONTENEDOR_PROP_CERT_ORIGEN_BORRADOR)
     cert_origen_raw          = contenedor_sample_props.get(CONTENEDOR_PROP_CERT_ORIGEN)
@@ -695,6 +849,7 @@ def _build_pedido_info(
         notify=cotizacion_props.get(COTIZACION_PROP_NOTIFY),
         puerto_destino=cotizacion_props.get(COTIZACION_PROP_PUERTO_DESTINO),
         puerto_salida=cotizacion_props.get(COTIZACION_PROP_PUERTO_SALIDA),
+        tipo_de_venta=(cotizacion_props.get(COTIZACION_PROP_TIPO_DE_VENTA) or None),
         descripcion_mercancia=cotizacion_props.get(DEAL_PROP_DESCRIPCION_MERCANCIA),
         observaciones=pedido_props.get(DEAL_PROP_OBSERVACIONES),
         fecha_de_entrega=(pedido_props.get(DEAL_PROP_FECHA_DE_ENTREGA) or None),
@@ -711,14 +866,17 @@ def _build_pedido_info(
         bl_validado_administracion=_parse_bool(pedido_props.get(DEAL_PROP_BL_VALIDADO_ADMINISTRACION)),
         bl_enviado_cliente=_parse_bool(pedido_props.get(DEAL_PROP_BL_ENVIADO_CLIENTE)),
         tipo_de_bl=(pedido_props.get(DEAL_PROP_TIPO_DE_BL) or None),
+        numero_de_booking=(pedido_props.get(DEAL_PROP_NUMERO_DE_BOOKING) or None),
         bl_archivos=_build_bl_archivos(pedido_props.get(DEAL_PROP_BORRADOR_BL)),
         certificado_origen_validado=_parse_bool(contenedor_sample_props.get(CONTENEDOR_PROP_CERT_ORIGEN_VALIDADO)),
         certificado_sanitario_validado=_parse_bool(contenedor_sample_props.get(CONTENEDOR_PROP_CERT_SANITARIO_VALIDADO)),
+        certificado_origen_enviar_a_firmar=_parse_bool(contenedor_sample_props.get(CONTENEDOR_PROP_CERT_ORIGEN_ENVIAR_FIRMAR)),
+        certificado_sanitario_enviar_a_firmar=_parse_bool(contenedor_sample_props.get(CONTENEDOR_PROP_CERT_SANITARIO_ENVIAR_FIRMAR)),
         origen_archivos=_build_origen_archivos(cert_origen_borrador_raw, cert_origen_raw),
         sanitario_archivos=_build_sanitario_archivos(cert_sanitario_raw),
-        factura_pedido=_build_deal_file(pedido_props.get(DEAL_PROP_FACTURA_DEL_PEDIDO)),
-        packing_list_pedido=_build_deal_file(pedido_props.get(DEAL_PROP_PACKING_LIST_PROEX)),
-        carta_porte_pedido=_build_deal_file(pedido_props.get(DEAL_PROP_CARTA_DE_PORTE_PROEX)),
+        factura_pedido=_build_deal_file(pedido_props.get(DEAL_PROP_FACTURA_DEL_PEDIDO), meta_cache),
+        packing_list_pedido=_build_deal_file(pedido_props.get(DEAL_PROP_PACKING_LIST_PROEX), meta_cache),
+        carta_porte_pedido=_build_deal_file(pedido_props.get(DEAL_PROP_CARTA_DE_PORTE_PROEX), meta_cache),
         fecha_de_facturacion_pedido=(pedido_props.get(DEAL_PROP_FECHA_FACTURACION_PEDIDO) or None),
         fecha_de_vencimiento_factura=(pedido_props.get(DEAL_PROP_FECHA_VENCIMIENTO_FACTURA) or None),
     )
@@ -755,7 +913,7 @@ def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDe
 
     cotizacion_props: dict = {}
     for cid in contenedor_ids:
-        cot, _ = _classify_deals(contenedor_to_deals.get(cid, []), deal_props_by_id)
+        cot, _, _ = _classify_deals(contenedor_to_deals.get(cid, []), deal_props_by_id)
         if cot is not None:
             cotizacion_props = cot[1]
             break
@@ -779,9 +937,16 @@ def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDe
         client, OBJECT_TYPE_PROVEEDOR, "lugar_de_la_carga_envio",
         cotizacion_props.get(COTIZACION_PROP_LOCALIDAD_DESTINO, ""),
     )
+    cotizacion_props[COTIZACION_PROP_TIPO_DE_VENTA] = resolve_enum_label(
+        client, OBJECT_TYPE_DEAL, COTIZACION_PROP_TIPO_DE_VENTA,
+        cotizacion_props.get(COTIZACION_PROP_TIPO_DE_VENTA, ""),
+    )
 
+    tipo_contenedor_raw = _tipo_contenedor_representativo(
+        contenedores_props, contenedor_ids, contexto=f" pedido={numero_de_pedido}",
+    )
     tipo_flujo = _compute_tipo_flujo(
-        company_props.get(COMPANY_PROP_TIPO_CLIENTE),
+        tipo_contenedor_raw,
         cotizacion_props.get(COTIZACION_PROP_ALMACEN),
     )
 
@@ -797,26 +962,57 @@ def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDe
             client, OBJECT_TYPE_CONTENEDOR, CONTENEDOR_PROP_TIPO_CONTENEDOR, v,
         )
 
-    idioma_cotizacion = cotizacion_props.get("preprints_language")
     elementos_por_contenedor = get_elementos_fabricante_por_contenedor(
         client, contenedor_ids
     )
     descripcion_por_contenedor = {
         cid: calcular_descripcion_mercancia_agregada(
-            elementos_por_contenedor.get(cid, []), idioma_cotizacion
+            elementos_por_contenedor.get(cid, [])
         )
         for cid in contenedor_ids
     }
 
-    contenedores = [
-        _build_contenedor_item(
-            cid,
-            contenedores_props.get(cid, {}),
-            tipo_contenedor_labels,
-            descripcion_por_contenedor.get(cid),
+    # Caché de metadata de ficheros por request: factura/packing/carta suelen
+    # compartir file_id entre los N pedido-deals, así se piden una sola vez.
+    meta_cache: Dict[str, object] = {}
+
+    contenedores = []
+    for cid in contenedor_ids:
+        # Cambio 2 — booking, factura/packing/carta viven en el PEDIDO-deal del
+        # contenedor (1:1). El Negocio Documento (si existe) habilita la gestión.
+        _, pedido_c, documento_c = _classify_deals(
+            contenedor_to_deals.get(cid, []), deal_props_by_id,
         )
-        for cid in contenedor_ids
-    ]
+        pd = pedido_c[1] if pedido_c else {}
+        doc = documento_c[1] if documento_c else {}
+        documento_dealstage = (doc.get("dealstage") or None) if documento_c else None
+        contenedores.append(
+            _build_contenedor_item(
+                cid,
+                contenedores_props.get(cid, {}),
+                tipo_contenedor_labels,
+                descripcion_por_contenedor.get(cid),
+                numero_de_factura=pd.get(DEAL_PROP_NUMERO_DE_FACTURA),
+                fecha_de_vencimiento_factura=pd.get(DEAL_PROP_FECHA_VENCIMIENTO_FACTURA),
+                # BL, booking y ETD/ETA: Documento manda (fallback al Pedido del contenedor).
+                numero_de_booking=(_doc_first(doc, pd, DEAL_PROP_NUMERO_DE_BOOKING) or None),
+                etd=(_doc_first(doc, pd, DEAL_PROP_ETD) or None),
+                eta=(_doc_first(doc, pd, DEAL_PROP_ETA) or None),
+                transitario=(pd.get(DEAL_PROP_TRANSITARIO_DEL_PEDIDO) or None),
+                transitario_terrestre=(pd.get(DEAL_PROP_TRANSITARIO_TERRESTRE_DEL_PEDIDO) or None),
+                factura_pedido=_build_deal_file(pd.get(DEAL_PROP_FACTURA_DEL_PEDIDO), meta_cache),
+                packing_list_pedido=_build_deal_file(pd.get(DEAL_PROP_PACKING_LIST_PROEX), meta_cache),
+                carta_porte_pedido=_build_deal_file(pd.get(DEAL_PROP_CARTA_DE_PORTE_PROEX), meta_cache),
+                bl_validado_logistica=_parse_bool(_doc_first(doc, pd, DEAL_PROP_BL_VALIDADO_LOGISTICA)),
+                bl_validado_administracion=_parse_bool(_doc_first(doc, pd, DEAL_PROP_BL_VALIDADO_ADMINISTRACION)),
+                bl_enviado_cliente=_parse_bool(_doc_first(doc, pd, DEAL_PROP_BL_ENVIADO_CLIENTE)),
+                tipo_de_bl=(_doc_first(doc, pd, DEAL_PROP_TIPO_DE_BL) or None),
+                cambios_en_bl=(_doc_first(doc, pd, DEAL_PROP_CAMBIOS_EN_BL) or None),
+                bl_archivos=_build_bl_archivos(_doc_first(doc, pd, DEAL_PROP_BORRADOR_BL)),
+                tiene_negocio_documento=documento_c is not None,
+                documento_dealstage=documento_dealstage,
+            )
+        )
 
     detalle = PedidoDetalle(
         numero_de_pedido=numero_de_pedido,
@@ -828,9 +1024,12 @@ def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDe
         info=_build_pedido_info(
             pedido_props,
             cotizacion_props,
-            contenedores_props.get(contenedor_ids[0], {}) if contenedor_ids else {},
+            _merge_cert_props(contenedores_props, contenedor_ids) if contenedor_ids else {},
+            meta_cache=meta_cache,
         ),
         tipo_flujo=tipo_flujo,
+        es_contenedor=tipo_flujo in FLUJOS_CONTENEDOR,
+        es_san_roque=tipo_flujo in FLUJOS_SAN_ROQUE,
         carga_por_palets=(
             _parse_bool(cotizacion_props.get("carga_por_palets"))
             if cotizacion_props.get("carga_por_palets") is not None
@@ -889,6 +1088,18 @@ def _patch_pedido_deals(client, pedido_deal_ids: List[str], properties: dict) ->
     return updated
 
 
+def _recalcular_documentos_best_effort(client, numero_de_pedido: str) -> None:
+    """Recalcula la etapa de los Negocios Documento del pedido tras mutar un
+    documento. Best-effort: nunca rompe la operación de archivo si falla."""
+    try:
+        from app.documento_deal.service import _recalcular_dealstage_documento
+        _recalcular_dealstage_documento(client, numero_de_pedido)
+    except Exception as e:
+        logger.warning(
+            f"[recalcular_documentos] numero={numero_de_pedido!r} fallo (no bloqueante): {e}"
+        )
+
+
 def _update_pedido_bl_sync(
     numero_de_pedido: str, company_id: str, payload: UpdatePedidoBLRequest,
 ) -> UpdatePedidoResponse:
@@ -904,17 +1115,39 @@ def _update_pedido_bl_sync(
         properties[DEAL_PROP_BL_ENVIADO_CLIENTE] = "true" if payload.bl_enviado_cliente else "false"
     if payload.tipo_de_bl is not None:
         properties[DEAL_PROP_TIPO_DE_BL] = payload.tipo_de_bl or ""
+    if payload.cambios_en_bl is not None:
+        properties[DEAL_PROP_CAMBIOS_EN_BL] = payload.cambios_en_bl or ""
 
     if not properties:
-        return UpdatePedidoResponse(success=False, error="Al menos un campo BL es obligatorio.")
+        return UpdatePedidoResponse(success=False, error="Al menos un campo es obligatorio.")
+
+    # BL del embarque seleccionado: se escribe en el Negocio Documento (autoritativo)
+    # y en el Negocio Pedido de los contenedores objetivo. Sin selección → todos.
+    # Con selección explícita NO se ensancha a todo el pedido (igual que el borrado).
+    tiene_seleccion = bool(payload.contenedor_ids)
+    target_cids = _resolve_target_contenedor_ids(client, pedido_deal_ids, payload.contenedor_ids)
+    if tiene_seleccion and not target_cids:
+        return UpdatePedidoResponse(
+            success=False, error="Los contenedores seleccionados no pertenecen al pedido.",
+        )
+    target_pedido = _resolve_target_pedido_deal_ids(
+        client, pedido_deal_ids, target_cids, allow_fallback=not tiene_seleccion,
+    )
+    if tiene_seleccion and not target_pedido:
+        return UpdatePedidoResponse(
+            success=False, error="Los contenedores seleccionados no tienen pedido-deal asociado.",
+        )
+    target_documento = _resolve_target_documento_deal_ids(client, target_cids)
 
     logger.info(
         f"[update_pedido_bl] numero={numero_de_pedido!r} props={list(properties.keys())} "
-        f"deals={pedido_deal_ids}"
+        f"pedido_deals={target_pedido} documento_deals={target_documento}"
     )
-    updated = _patch_pedido_deals(client, pedido_deal_ids, properties)
+    updated = _patch_pedido_deals(client, target_pedido, properties)
+    updated += _patch_pedido_deals(client, target_documento, properties)
     if updated == 0:
         return UpdatePedidoResponse(success=False, error="No se pudo actualizar ningún deal.")
+    _recalcular_documentos_best_effort(client, numero_de_pedido)
     return UpdatePedidoResponse(success=True)
 
 
@@ -950,6 +1183,14 @@ def _update_contenedores_certificados_sync(
         properties[CONTENEDOR_PROP_CERT_SANITARIO_VALIDADO] = (
             "true" if payload.certificado_sanitario_validado else "false"
         )
+    if payload.certificado_origen_enviar_a_firmar is not None:
+        properties[CONTENEDOR_PROP_CERT_ORIGEN_ENVIAR_FIRMAR] = (
+            "true" if payload.certificado_origen_enviar_a_firmar else "false"
+        )
+    if payload.certificado_sanitario_enviar_a_firmar is not None:
+        properties[CONTENEDOR_PROP_CERT_SANITARIO_ENVIAR_FIRMAR] = (
+            "true" if payload.certificado_sanitario_enviar_a_firmar else "false"
+        )
 
     if not properties:
         return UpdatePedidoResponse(success=False, error="Al menos un campo es obligatorio.")
@@ -967,6 +1208,7 @@ def _update_contenedores_certificados_sync(
     updated = _patch_contenedores_batch(client, contenedor_ids, properties)
     if updated == 0:
         return UpdatePedidoResponse(success=False, error="No se pudo actualizar ningún contenedor.")
+    _recalcular_documentos_best_effort(client, numero_de_pedido)
     return UpdatePedidoResponse(success=True)
 
 
@@ -1014,6 +1256,9 @@ def _update_contenedor_entrega_sync(
         if value is not None:
             properties[prop] = "true" if value else "false"
 
+    if "datos_envio_mensajeria" in payload.model_fields_set:
+        properties[CONTENEDOR_PROP_DATOS_ENVIO_MENSAJERIA] = payload.datos_envio_mensajeria or ""
+
     if "fecha_llegada_contenedor" in payload.model_fields_set:
         properties[CONTENEDOR_PROP_FECHA_LLEGADA_CONTENEDOR] = _hubspot_date_from_iso(
             payload.fecha_llegada_contenedor
@@ -1033,6 +1278,7 @@ def _update_contenedor_entrega_sync(
     updated = _patch_contenedores_batch(client, [contenedor_id], properties)
     if updated == 0:
         return UpdatePedidoResponse(success=False, error="No se pudo actualizar el contenedor.")
+    _recalcular_documentos_best_effort(client, numero_de_pedido)
     return UpdatePedidoResponse(success=True)
 
 
@@ -1050,6 +1296,201 @@ async def update_contenedor_entrega(
     except Exception as e:
         logger.error(
             f"[update_contenedor_entrega] ERROR numero={numero_de_pedido!r} "
+            f"contenedor={contenedor_id}: {e}",
+            exc_info=True,
+        )
+        return UpdatePedidoResponse(success=False, error=str(e))
+
+
+# Datos físicos del contenedor editables desde Documentos. Viven en el propio
+# Contenedor (los PDFs los leen de ahí), así que basta con un PATCH al contenedor.
+_CONTENEDOR_DATOS_FIELDS = (
+    "numero_contenedor",
+    "numero_precinto",
+    "peso_bruto",
+    "peso_neto",
+    "tara",
+)
+
+
+def _update_contenedor_datos_sync(
+    numero_de_pedido: str, company_id: str, contenedor_id: str,
+    payload: UpdateContenedorDatosRequest,
+) -> UpdatePedidoResponse:
+    client = hubspot_client.get_client()
+    pedido_deal_ids = _verify_pedido_belongs_to_company(client, numero_de_pedido, company_id)
+
+    contenedor_ids = _get_contenedores_of_pedido(client, pedido_deal_ids)
+    if contenedor_id not in contenedor_ids:
+        return UpdatePedidoResponse(
+            success=False, error="El contenedor no pertenece al pedido indicado.",
+        )
+
+    properties: dict = {}
+    for field in _CONTENEDOR_DATOS_FIELDS:
+        if field in payload.model_fields_set:
+            value = getattr(payload, field)
+            properties[field] = value if value is not None else ""
+
+    if not properties:
+        return UpdatePedidoResponse(success=False, error="Al menos un campo es obligatorio.")
+
+    logger.info(
+        f"[update_contenedor_datos] numero={numero_de_pedido!r} "
+        f"contenedor={contenedor_id} props={list(properties.keys())}"
+    )
+    updated = _patch_contenedores_batch(client, [contenedor_id], properties)
+    if updated == 0:
+        return UpdatePedidoResponse(success=False, error="No se pudo actualizar el contenedor.")
+    return UpdatePedidoResponse(success=True)
+
+
+async def update_contenedor_datos(
+    numero_de_pedido: str, company_id: str, contenedor_id: str,
+    payload: UpdateContenedorDatosRequest,
+) -> UpdatePedidoResponse:
+    try:
+        return await asyncio.to_thread(
+            _update_contenedor_datos_sync,
+            numero_de_pedido, company_id, contenedor_id, payload,
+        )
+    except PedidoNoEncontradoError:
+        raise
+    except Exception as e:
+        logger.error(
+            f"[update_contenedor_datos] ERROR numero={numero_de_pedido!r} "
+            f"contenedor={contenedor_id}: {e}",
+            exc_info=True,
+        )
+        return UpdatePedidoResponse(success=False, error=str(e))
+
+
+def _update_contenedor_booking_sync(
+    numero_de_pedido: str, company_id: str, contenedor_id: str,
+    payload: UpdateContenedorBookingRequest,
+) -> UpdatePedidoResponse:
+    # Cambio 2 — booking INDIVIDUAL: se escribe solo en el pedido-deal (1:1) de
+    # este contenedor; un pedido puede tener bookings distintos por embarque.
+    if payload.numero_de_booking is None:
+        return UpdatePedidoResponse(success=False, error="numero_de_booking es obligatorio.")
+
+    client = hubspot_client.get_client()
+    pedido_deal_ids = _verify_pedido_belongs_to_company(client, numero_de_pedido, company_id)
+
+    if contenedor_id not in _get_contenedores_of_pedido(client, pedido_deal_ids):
+        return UpdatePedidoResponse(
+            success=False, error="El contenedor no pertenece al pedido indicado.",
+        )
+
+    container_deals = _get_deal_ids_for_contenedores(client, [contenedor_id]).get(contenedor_id, [])
+    pedido_set = set(pedido_deal_ids)
+    target = [d for d in container_deals if d in pedido_set]
+    if not target:
+        return UpdatePedidoResponse(
+            success=False, error="El contenedor no tiene pedido-deal asociado.",
+        )
+    if len(target) > 1:
+        # Invariante Cambio 2: 1 pedido-deal por Contenedor. Si hay >1, la lectura
+        # solo refleja el primero; se escriben todos con el mismo valor (consistentes).
+        logger.warning(
+            f"[update_contenedor_booking] contenedor={contenedor_id} con {len(target)} "
+            f"pedido-deals (esperado 1): {target}"
+        )
+
+    # Documento manda: el booking se escribe también en el Negocio Documento del
+    # contenedor, además de su Pedido-deal.
+    target_documento = _resolve_target_documento_deal_ids(client, [contenedor_id])
+    booking_props = {DEAL_PROP_NUMERO_DE_BOOKING: payload.numero_de_booking or ""}
+
+    logger.info(
+        f"[update_contenedor_booking] numero={numero_de_pedido!r} "
+        f"contenedor={contenedor_id} pedido_deal(s)={target} documento_deal(s)={target_documento}"
+    )
+    updated = _patch_pedido_deals(client, target, booking_props)
+    updated += _patch_pedido_deals(client, target_documento, booking_props)
+    if updated == 0:
+        return UpdatePedidoResponse(success=False, error="No se pudo actualizar el booking.")
+    return UpdatePedidoResponse(success=True)
+
+
+async def update_contenedor_booking(
+    numero_de_pedido: str, company_id: str, contenedor_id: str,
+    payload: UpdateContenedorBookingRequest,
+) -> UpdatePedidoResponse:
+    try:
+        return await asyncio.to_thread(
+            _update_contenedor_booking_sync,
+            numero_de_pedido, company_id, contenedor_id, payload,
+        )
+    except PedidoNoEncontradoError:
+        raise
+    except Exception as e:
+        logger.error(
+            f"[update_contenedor_booking] ERROR numero={numero_de_pedido!r} "
+            f"contenedor={contenedor_id}: {e}",
+            exc_info=True,
+        )
+        return UpdatePedidoResponse(success=False, error=str(e))
+
+
+def _update_contenedor_fechas_sync(
+    numero_de_pedido: str, company_id: str, contenedor_id: str,
+    payload: UpdateContenedorFechasRequest,
+) -> UpdatePedidoResponse:
+    # ETD/ETA por contenedor: la lectura usa el Documento (fallback Pedido), así que
+    # se escriben en AMBOS deals del contenedor para mantener la consistencia.
+    client = hubspot_client.get_client()
+    pedido_deal_ids = _verify_pedido_belongs_to_company(client, numero_de_pedido, company_id)
+
+    if contenedor_id not in _get_contenedores_of_pedido(client, pedido_deal_ids):
+        return UpdatePedidoResponse(
+            success=False, error="El contenedor no pertenece al pedido indicado.",
+        )
+
+    props: dict = {}
+    if "etd" in payload.model_fields_set:
+        props[DEAL_PROP_ETD] = _hubspot_date_from_iso(payload.etd)
+    if "eta" in payload.model_fields_set:
+        props[DEAL_PROP_ETA] = _hubspot_date_from_iso(payload.eta)
+    if not props:
+        return UpdatePedidoResponse(success=True)
+
+    container_deals = _get_deal_ids_for_contenedores(client, [contenedor_id]).get(contenedor_id, [])
+    pedido_set = set(pedido_deal_ids)
+    target = [d for d in container_deals if d in pedido_set]
+    if not target:
+        return UpdatePedidoResponse(
+            success=False, error="El contenedor no tiene pedido-deal asociado.",
+        )
+
+    target_documento = _resolve_target_documento_deal_ids(client, [contenedor_id])
+
+    logger.info(
+        f"[update_contenedor_fechas] numero={numero_de_pedido!r} "
+        f"contenedor={contenedor_id} props={list(props.keys())} "
+        f"pedido_deal(s)={target} documento_deal(s)={target_documento}"
+    )
+    updated = _patch_pedido_deals(client, target, props)
+    updated += _patch_pedido_deals(client, target_documento, props)
+    if updated == 0:
+        return UpdatePedidoResponse(success=False, error="No se pudieron actualizar las fechas.")
+    return UpdatePedidoResponse(success=True)
+
+
+async def update_contenedor_fechas(
+    numero_de_pedido: str, company_id: str, contenedor_id: str,
+    payload: UpdateContenedorFechasRequest,
+) -> UpdatePedidoResponse:
+    try:
+        return await asyncio.to_thread(
+            _update_contenedor_fechas_sync,
+            numero_de_pedido, company_id, contenedor_id, payload,
+        )
+    except PedidoNoEncontradoError:
+        raise
+    except Exception as e:
+        logger.error(
+            f"[update_contenedor_fechas] ERROR numero={numero_de_pedido!r} "
             f"contenedor={contenedor_id}: {e}",
             exc_info=True,
         )
@@ -1161,14 +1602,61 @@ def _read_deal_prop_value(client, deal_id: str, prop: str) -> str:
 
 
 def _resolve_target_contenedor_ids(
-    client, pedido_deal_ids: List[str], contenedor_id: Optional[str],
+    client, pedido_deal_ids: List[str], contenedor_ids: Optional[List[str]],
 ) -> List[str]:
-    if contenedor_id:
-        return [contenedor_id]
-    contenedor_ids = _get_contenedores_of_pedido(client, pedido_deal_ids)
-    if not contenedor_ids:
+    """Cambio 2 — docs por EMBARQUE: el destino es el SUBCONJUNTO de contenedores
+    seleccionado. Sin selección → todos los del pedido (subir una vez y replicar
+    a todos). La selección se INTERSECA siempre con los contenedores reales del
+    pedido (no se confía en el cliente: evita leer/escribir props de contenedores
+    ajenos al pedido verificado)."""
+    todos = _get_contenedores_of_pedido(client, pedido_deal_ids)
+    if contenedor_ids:
+        permitidos = set(todos)
+        return [c for c in dict.fromkeys([c for c in contenedor_ids if c]) if c in permitidos]
+    return todos
+
+
+def _resolve_target_pedido_deal_ids(
+    client, pedido_deal_ids: List[str], target_cids: List[str],
+    allow_fallback: bool = True,
+) -> List[str]:
+    """Pedido-deals (1:1) de los contenedores objetivo, para los docs de scope
+    'deal' (p. ej. BL): replicar el file_id solo a los deals del subconjunto.
+    `allow_fallback`: en SUBIDA, si no se resuelve ninguno se cae a todos (no
+    romper). En BORRADO con selección explícita se pasa False para NO ensanchar
+    un borrado acotado a todo el pedido (devuelve [] y el caller lo trata como error)."""
+    if not target_cids:
+        return pedido_deal_ids
+    cid_to_deals = _get_deal_ids_for_contenedores(client, target_cids)
+    pedido_set = set(pedido_deal_ids)
+    out: List[str] = []
+    for cid in target_cids:
+        for did in cid_to_deals.get(cid, []):
+            if did in pedido_set and did not in out:
+                out.append(did)
+    if out:
+        return out
+    return pedido_deal_ids if allow_fallback else []
+
+
+def _resolve_target_documento_deal_ids(client, target_cids: List[str]) -> List[str]:
+    """Negocio Documento (pipeline DOCUMENTO_PIPELINE_ID) de los contenedores
+    objetivo. El BL y el booking se escriben aquí además del Pedido-deal: el
+    Documento es la fuente de verdad. Invariante 1 Documento : 1 Contenedor; si
+    hubiera >1 se escriben todos con el mismo valor."""
+    if not target_cids:
         return []
-    return [contenedor_ids[0]]
+    cid_to_deals = _get_deal_ids_for_contenedores(client, target_cids)
+    all_dids = list(dict.fromkeys(
+        did for cid in target_cids for did in cid_to_deals.get(cid, [])
+    ))
+    if not all_dids:
+        return []
+    props_by_id = _batch_read_deals_min(client, all_dids)
+    return [
+        did for did in all_dids
+        if (props_by_id.get(did) or {}).get(DEAL_PROP_PIPELINE) == DOCUMENTO_PIPELINE_ID
+    ]
 
 
 def _upload_pedido_file_sync(
@@ -1178,7 +1666,7 @@ def _upload_pedido_file_sync(
     tipo_documento: str,
     original_filename: Optional[str],
     mime_type: Optional[str],
-    contenedor_id: Optional[str],
+    contenedor_ids: Optional[List[str]],
 ) -> UploadFileResponse:
     config = FILE_TYPE_CONFIG.get(tipo_documento)
     if config is None:
@@ -1197,15 +1685,25 @@ def _upload_pedido_file_sync(
     client = hubspot_client.get_client()
     pedido_deal_ids = _verify_pedido_belongs_to_company(client, numero_de_pedido, company_id)
 
+    # Cambio 2 — destino = subconjunto de contenedores seleccionado (embarque).
+    target_cids = _resolve_target_contenedor_ids(client, pedido_deal_ids, contenedor_ids)
+    if not target_cids:
+        return UploadFileResponse(
+            success=False, error="El pedido no tiene contenedores asociados.",
+        )
     if scope == "deal":
-        current_raw = _read_deal_prop_value(client, pedido_deal_ids[0], prop)
-        target_cids: List[str] = []
-    else:
-        target_cids = _resolve_target_contenedor_ids(client, pedido_deal_ids, contenedor_id)
-        if not target_cids:
+        # BL y otros de scope 'deal': replicar a los pedido-deals del subconjunto.
+        # Con selección explícita no se ensancha a todo el pedido (igual que el borrado).
+        target_deal_ids = _resolve_target_pedido_deal_ids(
+            client, pedido_deal_ids, target_cids, allow_fallback=not contenedor_ids,
+        )
+        if not target_deal_ids:
             return UploadFileResponse(
-                success=False, error="El pedido no tiene contenedores asociados.",
+                success=False,
+                error="Los contenedores seleccionados no tienen pedido-deal asociado.",
             )
+        current_raw = _read_deal_prop_value(client, target_deal_ids[0], prop)
+    else:
         current_raw = _read_contenedor_prop_value(client, target_cids[0], prop)
 
     current_ids = parse_file_ids(current_raw)
@@ -1247,9 +1745,16 @@ def _upload_pedido_file_sync(
     new_value = serialize_file_ids(kept_ids)
 
     if scope == "deal":
-        _patch_pedido_deals(client, pedido_deal_ids, {prop: new_value})
+        # Documento manda: el fichero (BL) se replica al Negocio Documento además
+        # del Negocio Pedido de los contenedores objetivo.
+        _patch_pedido_deals(client, target_deal_ids, {prop: new_value})
+        _patch_pedido_deals(
+            client, _resolve_target_documento_deal_ids(client, target_cids), {prop: new_value},
+        )
     else:
         _patch_contenedores_batch(client, target_cids, {prop: new_value})
+
+    _recalcular_documentos_best_effort(client, numero_de_pedido)
 
     return UploadFileResponse(
         success=True,
@@ -1267,7 +1772,7 @@ async def upload_pedido_file(
     tipo_documento: str,
     original_filename: Optional[str] = None,
     mime_type: Optional[str] = None,
-    contenedor_id: Optional[str] = None,
+    contenedor_ids: Optional[List[str]] = None,
 ) -> UploadFileResponse:
     try:
         return await asyncio.to_thread(
@@ -1278,7 +1783,7 @@ async def upload_pedido_file(
             tipo_documento,
             original_filename,
             mime_type,
-            contenedor_id,
+            contenedor_ids,
         )
     except PedidoNoEncontradoError:
         raise
@@ -1294,7 +1799,7 @@ def _delete_pedido_file_sync(
     company_id: str,
     file_id: str,
     tipo_documento: str,
-    contenedor_id: Optional[str],
+    contenedor_ids: Optional[List[str]],
 ) -> DeleteFileResponse:
     config = FILE_TYPE_CONFIG.get(tipo_documento)
     if config is None:
@@ -1308,33 +1813,68 @@ def _delete_pedido_file_sync(
     client = hubspot_client.get_client()
     pedido_deal_ids = _verify_pedido_belongs_to_company(client, numero_de_pedido, company_id)
 
+    # Cambio 2 — el borrado es simétrico a la subida: si un doc se replicó a un
+    # subconjunto (embarque), se quita de TODOS ellos. Se recalcula POR objeto
+    # porque las props pueden divergir (subidas a subconjuntos distintos).
     if scope == "deal":
-        current_raw = _read_deal_prop_value(client, pedido_deal_ids[0], prop)
-        target_cids: List[str] = []
+        if contenedor_ids:
+            tcids = _resolve_target_contenedor_ids(client, pedido_deal_ids, contenedor_ids)
+            if not tcids:
+                return DeleteFileResponse(
+                    success=False,
+                    error="Los contenedores seleccionados no pertenecen al pedido.",
+                )
+            target_deal_ids = _resolve_target_pedido_deal_ids(
+                client, pedido_deal_ids, tcids, allow_fallback=False,
+            )
+            if not target_deal_ids:
+                return DeleteFileResponse(
+                    success=False,
+                    error="Los contenedores seleccionados no tienen pedido-deal asociado.",
+                )
+        else:
+            tcids = _get_contenedores_of_pedido(client, pedido_deal_ids)
+            target_deal_ids = pedido_deal_ids
+        # Documento manda: el fichero también se quita del Negocio Documento.
+        target_documento = _resolve_target_documento_deal_ids(client, tcids)
+        removed = False
+        for did in [*target_deal_ids, *target_documento]:
+            current_ids = parse_file_ids(_read_deal_prop_value(client, did, prop))
+            if file_id not in current_ids:
+                continue
+            new_value = serialize_file_ids([fid for fid in current_ids if fid != file_id])
+            _patch_pedido_deals(client, [did], {prop: new_value})
+            removed = True
+        if not removed:
+            return DeleteFileResponse(success=False, error="file_id no presente en la propiedad")
     else:
-        target_cids = _resolve_target_contenedor_ids(client, pedido_deal_ids, contenedor_id)
+        target_cids = _resolve_target_contenedor_ids(client, pedido_deal_ids, contenedor_ids)
         if not target_cids:
             return DeleteFileResponse(
                 success=False, error="El pedido no tiene contenedores asociados.",
             )
-        current_raw = _read_contenedor_prop_value(client, target_cids[0], prop)
-
-    current_ids = parse_file_ids(current_raw)
-    if file_id not in current_ids:
-        return DeleteFileResponse(success=False, error="file_id no presente en la propiedad")
-
-    new_ids = [fid for fid in current_ids if fid != file_id]
-    new_value = serialize_file_ids(new_ids)
-
-    if scope == "deal":
-        _patch_pedido_deals(client, pedido_deal_ids, {prop: new_value})
-    else:
-        _patch_contenedores_batch(client, target_cids, {prop: new_value})
+        # Se quita el file_id de cada contenedor del subconjunto que lo tenga
+        # (sus props pueden divergir, así que se recalcula por contenedor).
+        removed = False
+        for cid in target_cids:
+            current_ids = parse_file_ids(_read_contenedor_prop_value(client, cid, prop))
+            if file_id not in current_ids:
+                continue
+            new_value = serialize_file_ids([fid for fid in current_ids if fid != file_id])
+            _patch_contenedores_batch(client, [cid], {prop: new_value})
+            removed = True
+        if not removed:
+            return DeleteFileResponse(
+                success=False,
+                error="file_id no presente en los contenedores seleccionados",
+            )
 
     try:
         delete_file(file_id)
     except Exception as e:
         logger.warning(f"[delete_pedido_file] delete_file falló para {file_id!r}: {e}")
+
+    _recalcular_documentos_best_effort(client, numero_de_pedido)
 
     return DeleteFileResponse(success=True)
 
@@ -1344,7 +1884,7 @@ async def delete_pedido_file(
     company_id: str,
     file_id: str,
     tipo_documento: str,
-    contenedor_id: Optional[str] = None,
+    contenedor_ids: Optional[List[str]] = None,
 ) -> DeleteFileResponse:
     try:
         return await asyncio.to_thread(
@@ -1353,7 +1893,7 @@ async def delete_pedido_file(
             company_id,
             file_id,
             tipo_documento,
-            contenedor_id,
+            contenedor_ids,
         )
     except PedidoNoEncontradoError:
         raise
@@ -1430,12 +1970,17 @@ def render_upload_iframe_html(
     company_id: str,
     tipo_documento: str,
     contenedor_id: Optional[str] = None,
+    n_destinos: int = 0,
 ) -> str:
     import json as _json
 
     config = FILE_TYPE_CONFIG.get(tipo_documento)
     if config is None:
         return _render_invalid_tipo_html(tipo_documento)
+
+    destinos_hint = (
+        f" Se aplicará a {n_destinos} contenedores seleccionados." if n_destinos > 1 else ""
+    )
 
     label = config["label"]
     allowed_mimes: tuple = config.get("allowed_mime_types") or ("application/pdf",)
@@ -1516,7 +2061,7 @@ def render_upload_iframe_html(
 </head>
 <body>
 <h1>Subir {label}</h1>
-<p class="lead">El archivo se guardará en HubSpot y se asociará al pedido <strong>{numero_de_pedido}</strong>.</p>
+<p class="lead">El archivo se guardará en HubSpot y se asociará al pedido <strong>{numero_de_pedido}</strong>.{destinos_hint}</p>
 
 <label class="drop" for="file" id="drop">
   <p>Arrastra archivos aquí o haz click para seleccionar</p>

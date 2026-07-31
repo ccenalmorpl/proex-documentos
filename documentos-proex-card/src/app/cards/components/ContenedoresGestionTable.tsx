@@ -9,6 +9,7 @@ import {
   TableCell,
   Text,
   Button,
+  Checkbox,
   Heading,
   Flex,
   Tag,
@@ -16,26 +17,31 @@ import {
 
 import {
   buildDocumentosContenedorResumen,
+  bookingDeContenedor,
   calcularPorcentajePendiente,
   daysSince,
   daysUntil,
   formatDateES,
   formatPorcentaje,
+  resumenEstadoDocFila,
   type ContenedorGestionItem,
   type PedidoDetalleContenedor,
   type PedidoDetalleInfo,
 } from "../utils/documentos.utils";
-import { isFlujoNacional, type TipoPedido } from "../constants/documentos.constants";
+import { esAparienciaCamion, type TipoPedido } from "../constants/documentos.constants";
 
 interface ContenedoresGestionTableProps {
   contenedores: ContenedorGestionItem[];
   contenedoresDetalle: PedidoDetalleContenedor[];
   pedidoInfo: PedidoDetalleInfo;
   fotosDeCarga: boolean;
-  contenedorActivoId: string | null;
   tipoPedido: TipoPedido;
   cargaPorPalets: boolean;
-  onSeleccionar: (id: string) => void;
+  seleccionados: string[];
+  onToggleSeleccion: (id: string) => void;
+  onSeleccionarTodos: () => void;
+  onLimpiarSeleccion: () => void;
+  onAgruparPorBooking: () => void;
 }
 
 const isValor = (v: string | null | undefined): boolean =>
@@ -71,10 +77,13 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
   contenedoresDetalle,
   pedidoInfo,
   fotosDeCarga,
-  contenedorActivoId,
   tipoPedido,
   cargaPorPalets,
-  onSeleccionar,
+  seleccionados,
+  onToggleSeleccion,
+  onSeleccionarTodos,
+  onLimpiarSeleccion,
+  onAgruparPorBooking,
 }) => {
   if (contenedores.length === 0) {
     return (
@@ -84,22 +93,62 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
     );
   }
 
-  const flujoNacional = isFlujoNacional(tipoPedido);
-  const mostrarTaraVgm = !flujoNacional;
-  const headerUnidad = flujoNacional ? "Camión" : "Contenedor";
-  const labelNumero = flujoNacional ? "Nº camión" : "Nº contenedor";
-  const labelIdentificador = flujoNacional ? "Matrícula" : "Precinto";
+  const esCamion = esAparienciaCamion(tipoPedido);
+  const mostrarTaraVgm = !esCamion;
+  const headerUnidad = esCamion ? "Camión" : "Contenedor";
+  const labelNumero = esCamion ? "Nº camión" : "Nº contenedor";
+  const labelIdentificador = esCamion ? "Matrícula" : "Precinto";
+  const labelUnidadSing = esCamion ? "camión" : "contenedor";
   const detalleById = new Map(contenedoresDetalle.map((c) => [c.id, c]));
+  const seleccionadosSet = new Set(seleccionados);
+  const nSeleccionados = seleccionadosSet.size;
+  const nGestionables = contenedores.filter(
+    (c) => detalleById.get(c.id)?.tiene_negocio_documento,
+  ).length;
+  const todosSeleccionados = nGestionables > 0 && nSeleccionados >= nGestionables;
 
   const diasFacturado = daysSince(pedidoInfo.fecha_de_facturacion_pedido);
   const diasVencimiento = daysUntil(pedidoInfo.fecha_de_vencimiento_factura);
 
   return (
     <Flex direction="column" gap="sm">
-      <Heading>{flujoNacional ? "Camiones del pedido" : "Contenedores del pedido"}</Heading>
+      <Heading>{esCamion ? "Camiones del pedido" : "Contenedores del pedido"}</Heading>
+
+      <Flex direction="row" gap="small" align="center" wrap="wrap">
+        <Tag variant={nSeleccionados > 0 ? "info" : "default"}>
+          {nSeleccionados} seleccionado{nSeleccionados === 1 ? "" : "s"}
+        </Tag>
+        <Button
+          variant="secondary"
+          size="xs"
+          onClick={todosSeleccionados ? onLimpiarSeleccion : onSeleccionarTodos}
+          disabled={nGestionables === 0}
+        >
+          {todosSeleccionados ? "Quitar selección" : "Seleccionar todos"}
+        </Button>
+        <Button
+          variant="secondary"
+          size="xs"
+          onClick={onAgruparPorBooking}
+          disabled={nSeleccionados === 0}
+        >
+          Agrupar por booking
+        </Button>
+        {nSeleccionados > 0 && !todosSeleccionados && (
+          <Button variant="transparent" size="xs" onClick={onLimpiarSeleccion}>
+            Limpiar
+          </Button>
+        )}
+        <Text variant="microcopy">
+          Marca los {labelUnidadSing}es que quieras gestionar: se abren juntos abajo y
+          cada documento que subas se aplica a todos los marcados.
+        </Text>
+      </Flex>
+
       <Table>
         <TableHead>
           <TableRow>
+            <TableHeader width={48}>Gestionar</TableHeader>
             <TableHeader width={120}>{headerUnidad}</TableHeader>
             <TableHeader width={200}>Identificación</TableHeader>
             <TableHeader width={160}>Pesos (kg)</TableHeader>
@@ -111,8 +160,9 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
 
         <TableBody>
           {contenedores.map((c) => {
-            const isActive = c.id === contenedorActivoId;
             const detalle = detalleById.get(c.id);
+            const gestionable = detalle?.tiene_negocio_documento ?? false;
+            const isChecked = gestionable && seleccionadosSet.has(c.id);
             const docs = detalle
               ? buildDocumentosContenedorResumen({
                   contenedor: detalle,
@@ -121,8 +171,33 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
                   fotosDeCarga,
                 })
               : [];
+            const resumenFila = resumenEstadoDocFila(docs);
+            const booking = detalle ? bookingDeContenedor(detalle) : null;
             return (
               <TableRow key={c.id}>
+                <TableCell>
+                  <Flex direction="column" gap="extra-small" align="start">
+                    <Checkbox
+                      checked={isChecked}
+                      onChange={() => onToggleSeleccion(c.id)}
+                      name={`sel_${c.id}`}
+                      readOnly={!gestionable}
+                    >
+                      {""}
+                    </Checkbox>
+                    {gestionable ? (
+                      isChecked && <Tag variant="info">En gestión</Tag>
+                    ) : (
+                      <Flex direction="column" gap="extra-small" align="start">
+                        <Tag variant="default">En pedido</Tag>
+                        <Text variant="microcopy">
+                          Aún no ha completado el pedido
+                        </Text>
+                      </Flex>
+                    )}
+                  </Flex>
+                </TableCell>
+
                 <TableCell>
                   <Flex direction="column" gap="extra-small">
                     <Text format={{ fontWeight: "demibold" }}>
@@ -131,13 +206,16 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
                     {!cargaPorPalets && detalle?.tipo_contenedor && (
                       <Text variant="microcopy">{detalle.tipo_contenedor}</Text>
                     )}
-                    <Button
-                      variant={isActive ? "primary" : "secondary"}
-                      size="sm"
-                      onClick={() => onSeleccionar(c.id)}
-                    >
-                      {isActive ? "En gestión" : "Gestionar"}
-                    </Button>
+                    <Tag variant={resumenFila.variant}>{resumenFila.label}</Tag>
+                    {booking && (
+                      <Text variant="microcopy">Booking: {booking}</Text>
+                    )}
+                    {detalle?.etd && (
+                      <Text variant="microcopy">ETD: {formatDateES(detalle.etd)}</Text>
+                    )}
+                    {detalle?.eta && (
+                      <Text variant="microcopy">ETA: {formatDateES(detalle.eta)}</Text>
+                    )}
                   </Flex>
                 </TableCell>
 
@@ -155,6 +233,33 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
                       </Text>
                       {isValor(c.precinto) ? <Text>{c.precinto}</Text> : <Pendiente />}
                     </Flex>
+                    {esCamion && isValor(detalle?.transitario_terrestre) ? (
+                      <>
+                        <Flex direction="column" gap="extra-small">
+                          <Text variant="microcopy" format={{ fontWeight: "demibold" }}>
+                            Transitario marítimo
+                          </Text>
+                          {isValor(detalle?.transitario) ? (
+                            <Text>{detalle?.transitario}</Text>
+                          ) : (
+                            <Pendiente />
+                          )}
+                        </Flex>
+                        <Flex direction="column" gap="extra-small">
+                          <Text variant="microcopy" format={{ fontWeight: "demibold" }}>
+                            Transitario terrestre
+                          </Text>
+                          <Text>{detalle?.transitario_terrestre}</Text>
+                        </Flex>
+                      </>
+                    ) : isValor(detalle?.transitario) ? (
+                      <Flex direction="column" gap="extra-small">
+                        <Text variant="microcopy" format={{ fontWeight: "demibold" }}>
+                          Transitario
+                        </Text>
+                        <Text>{detalle?.transitario}</Text>
+                      </Flex>
+                    ) : null}
                   </Flex>
                 </TableCell>
 
@@ -193,6 +298,11 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
                         Pago
                       </Text>
                       <EstadoCobroTag detalle={detalle} />
+                      {detalle?.numero_de_factura && (
+                        <Text variant="microcopy">
+                          Nº factura: {detalle.numero_de_factura}
+                        </Text>
+                      )}
                       {diasFacturado !== null && (
                         <Flex direction="column" gap="extra-small" align="start">
                           <Tag variant={diasFacturado >= 0 ? "default" : "warning"}>

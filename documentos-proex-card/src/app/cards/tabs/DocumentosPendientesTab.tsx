@@ -12,6 +12,7 @@ import {
   Tile,
   TextArea,
 } from "@hubspot/ui-extensions";
+import { CrmDataHighlight } from "@hubspot/ui-extensions/crm";
 
 import FiltrosDocumentos from "../components/FiltrosDocumentos";
 import ContenedoresTable from "../components/ContenedoresTable";
@@ -24,10 +25,10 @@ import {
   type FiltrosState,
   type ContenedorItem,
   type GeneratedDoc,
-  type BaseDate,
 } from "../utils/documentos.utils";
 import {
   DEFAULT_FILTROS,
+  COMPANY_HIGHLIGHT_PROPS,
   DOC_TYPE_LABELS,
   ALL_DOC_TYPES,
   DOCUMENTOS_ERRORS,
@@ -50,7 +51,7 @@ const DOC_TYPE_OPTIONS = ALL_DOC_TYPES.map((t) => ({
 const DocumentosPendientesTab: React.FC<DocumentosPendientesTabProps> = ({
   context,
 }) => {
-  const dealId: string = context?.crm?.objectId ?? "";
+  const companyId: string = context?.crm?.objectId ?? "";
 
   const [filtros, setFiltros] = useState<FiltrosState>({ ...DEFAULT_FILTROS });
   const [contenedores, setContenedores] = useState<ContenedorItem[]>([]);
@@ -69,12 +70,12 @@ const DocumentosPendientesTab: React.FC<DocumentosPendientesTabProps> = ({
   const [idioma, setIdioma] = useState<Idioma>(DEFAULT_IDIOMA);
 
   useEffect(() => {
-    if (!dealId) return;
+    if (!companyId) return;
     let cancelled = false;
     (async () => {
       try {
         const resp = (await fetchFromAPI(
-          API_CONFIG.endpoints.documentosDealContext(dealId),
+          API_CONFIG.endpoints.documentosDealContext(companyId),
         )) as { preprints_language?: Idioma | null };
         if (cancelled) return;
         const lang = resp?.preprints_language;
@@ -89,7 +90,7 @@ const DocumentosPendientesTab: React.FC<DocumentosPendientesTabProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [dealId]);
+  }, [companyId]);
 
   useEffect(() => {
     if (selectedIds.length === 0) {
@@ -137,15 +138,15 @@ const DocumentosPendientesTab: React.FC<DocumentosPendientesTabProps> = ({
   const hasNotRequired = notRequiredLines.length > 0;
 
   const handleFiltroChange = useCallback(
-    (field: keyof FiltrosState, value: string | string[] | BaseDate | null) => {
+    (field: keyof FiltrosState, value: string[]) => {
       setFiltros((prev) => ({ ...prev, [field]: value }));
     },
     []
   );
 
   const handleApplyFiltros = useCallback(async () => {
-    if (!dealId) {
-      setError("No se encontró el ID del Deal en el contexto.");
+    if (!companyId) {
+      setError("No se encontró la empresa en el contexto de la card.");
       return;
     }
     setError(null);
@@ -154,7 +155,7 @@ const DocumentosPendientesTab: React.FC<DocumentosPendientesTabProps> = ({
     setLoadingList(true);
     setHasSearched(true);
     try {
-      const payload = buildPendingPayload(dealId, filtros);
+      const payload = buildPendingPayload(companyId, filtros);
       const response = await fetchFromAPI(API_CONFIG.endpoints.documentosPending, {
         method: "POST",
         body: payload,
@@ -172,7 +173,7 @@ const DocumentosPendientesTab: React.FC<DocumentosPendientesTabProps> = ({
     } finally {
       setLoadingList(false);
     }
-  }, [dealId, filtros]);
+  }, [companyId, filtros]);
 
   const handleToggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) =>
@@ -192,7 +193,7 @@ const DocumentosPendientesTab: React.FC<DocumentosPendientesTabProps> = ({
     setError(null);
     setLoadingGenerate(true);
     try {
-      const payload = buildGeneratePayload(dealId, selectedIds, selectedDocTypes, descripcionMercancia || undefined, observaciones || undefined, idioma);
+      const payload = buildGeneratePayload(companyId, selectedIds, selectedDocTypes, descripcionMercancia || undefined, observaciones || undefined, idioma);
       const response = await fetchFromAPI(API_CONFIG.endpoints.documentosGenerate, {
         method: "POST",
         body: payload,
@@ -203,7 +204,7 @@ const DocumentosPendientesTab: React.FC<DocumentosPendientesTabProps> = ({
     } finally {
       setLoadingGenerate(false);
     }
-  }, [dealId, selectedIds, selectedDocTypes, descripcionMercancia, observaciones, idioma]);
+  }, [companyId, selectedIds, selectedDocTypes, descripcionMercancia, observaciones, idioma]);
 
   const handleNuevaGeneracion = useCallback(() => {
     setFiltros({ ...DEFAULT_FILTROS });
@@ -243,6 +244,10 @@ const DocumentosPendientesTab: React.FC<DocumentosPendientesTabProps> = ({
 
   return (
     <Flex direction="column" gap="medium">
+
+      {companyId && (
+        <CrmDataHighlight properties={COMPANY_HIGHLIGHT_PROPS} />
+      )}
 
       <FiltrosDocumentos
         filtros={filtros}

@@ -3,15 +3,13 @@ import {
   Box,
   Flex,
   Form,
-  SearchInput,
-  DateInput,
   ToggleGroup,
   Button,
   Heading,
   Text,
 } from "@hubspot/ui-extensions";
 
-import type { FiltrosState, BaseDate } from "../utils/documentos.utils";
+import type { FiltrosState } from "../utils/documentos.utils";
 import { DOC_TYPE_LABELS, ALL_DOC_TYPES } from "../constants/documentos.constants";
 
 interface DocTypeOption {
@@ -21,7 +19,7 @@ interface DocTypeOption {
 
 interface FiltrosDocumentosProps {
   filtros: FiltrosState;
-  onChange: (field: keyof FiltrosState, value: string | string[] | BaseDate | null) => void;
+  onChange: (field: keyof FiltrosState, value: string[]) => void;
   docTypeOptions?: DocTypeOption[];
   onApply: () => void;
   loading?: boolean;
@@ -43,28 +41,16 @@ const FiltrosDocumentos: React.FC<FiltrosDocumentosProps> = ({
   docTypeTooltip = "",
   docTypeMicrocopy = "Selecciona al menos un tipo.",
 }) => {
-  const canApply =
-    filtros.empresa.trim() !== "" && filtros.tipos_documento.length > 0;
+  const canApply = filtros.tipos_documento.length > 0;
 
   return (
     <Box>
       <Heading>Filtros</Heading>
       <Text variant="microcopy">
-        Selecciona empresa y tipo de documento para buscar. Los campos marcados con * son obligatorios.
+        Selecciona el tipo de documento para buscar contenedores de esta empresa.
       </Text>
       <Form>
         <Flex direction="column" gap="small">
-
-          <SearchInput
-            label="Empresa (cliente)"
-            name="empresa"
-            value={filtros.empresa}
-            onInput={(v: string) => onChange("empresa", v)}
-            placeholder=""
-            required
-            description="Nombre (parcial o completo) de la empresa cliente asociada al contenedor."
-            tooltip="Filtra por el nombre de la empresa. Admite búsqueda parcial (p. ej. 'Agro' encuentra 'Agroexport S.L.')."
-          />
 
           <ToggleGroup
             label="Tipo de documento *"
@@ -76,44 +62,6 @@ const FiltrosDocumentos: React.FC<FiltrosDocumentosProps> = ({
             tooltip={docTypeTooltip}
           />
           <Text variant="microcopy">{docTypeMicrocopy}</Text>
-
-          <Flex direction="row" gap="small">
-            <DateInput
-              label="ETD — desde"
-              name="etd_desde"
-              value={filtros.etd_desde ?? undefined}
-              onChange={(v) => onChange("etd_desde", v)}
-              description="Opcional. Límite inicial del rango."
-              tooltip="Estimated Time of Departure del contenedor. Filtra desde este día inclusive."
-            />
-            <DateInput
-              label="ETD — hasta"
-              name="etd_hasta"
-              value={filtros.etd_hasta ?? undefined}
-              onChange={(v) => onChange("etd_hasta", v)}
-              description="Opcional. Límite final del rango."
-              tooltip="Estimated Time of Departure del contenedor. Filtra hasta este día inclusive."
-            />
-          </Flex>
-
-          <Flex direction="row" gap="small">
-            <DateInput
-              label="ETA — desde"
-              name="eta_desde"
-              value={filtros.eta_desde ?? undefined}
-              onChange={(v) => onChange("eta_desde", v)}
-              description="Opcional. Límite inicial del rango."
-              tooltip="Estimated Time of Arrival del contenedor. Filtra desde este día inclusive."
-            />
-            <DateInput
-              label="ETA — hasta"
-              name="eta_hasta"
-              value={filtros.eta_hasta ?? undefined}
-              onChange={(v) => onChange("eta_hasta", v)}
-              description="Opcional. Límite final del rango."
-              tooltip="Estimated Time of Arrival del contenedor. Filtra hasta este día inclusive."
-            />
-          </Flex>
 
           <Button
             variant="primary"

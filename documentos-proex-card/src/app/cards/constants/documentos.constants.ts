@@ -74,6 +74,14 @@ export const OTROS_DOC_SUBIBLES_DISCRIMINADOS = [
   OTROS_DOC_TYPE_INSPECCION,
 ] as const;
 
+// Cambio 2 — el DUA abre el timeline de exportación (etapa previa al BL) y por
+// eso se saca de "Otros documentos". El resto de documentos sin etapa (ARC,
+// EUR.1, Anexo I, inspección, waiver, otros, fotos) se gestionan en "Otros
+// documentos". Las subidas se replican al subconjunto seleccionado.
+export const EMBARQUE_DOC_TIPO_DUA = OTROS_DOC_TYPE_DUA;
+
+export const EMBARQUE_DOC_TIPOS_EXPORT = [EMBARQUE_DOC_TIPO_DUA] as const;
+
 // Documentos que NO deben renderizarse en "Documentos a aportar" (van en otra etapa o son readonly)
 export const OTROS_DOC_GESTIONADOS_EN_OTRAS_ETAPAS = new Set<string>([
   "bl",
@@ -108,29 +116,40 @@ export const FOTO_CARGA_FILE_TYPE = "foto_carga";
 export const OTROS_DOC_MAX_FILES   = 10;
 export const FOTOS_CARGA_MAX_FILES = 10;
 
-export const TIPO_PEDIDO_EXPORTACION         = "exportacion";
-export const TIPO_PEDIDO_NACIONAL            = "nacional";
-export const TIPO_PEDIDO_NACIONAL_SAN_ROQUE  = "nacional_san_roque";
+// Apariencia y etapas por transporte (contenedor vs camión) y origen (San Roque).
+export const TIPO_PEDIDO_CONTENEDOR             = "contenedor";
+export const TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE  = "contenedor_san_roque";
+export const TIPO_PEDIDO_CAMION                = "camion";
+export const TIPO_PEDIDO_CAMION_SAN_ROQUE      = "camion_san_roque";
 
 export type TipoPedido =
-  | typeof TIPO_PEDIDO_EXPORTACION
-  | typeof TIPO_PEDIDO_NACIONAL
-  | typeof TIPO_PEDIDO_NACIONAL_SAN_ROQUE;
+  | typeof TIPO_PEDIDO_CONTENEDOR
+  | typeof TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE
+  | typeof TIPO_PEDIDO_CAMION
+  | typeof TIPO_PEDIDO_CAMION_SAN_ROQUE;
 
 export const TIPO_PEDIDO_OPTIONS: Array<{ label: string; value: TipoPedido }> = [
-  { label: "Exportación",        value: TIPO_PEDIDO_EXPORTACION },
-  { label: "Nacional",           value: TIPO_PEDIDO_NACIONAL },
-  { label: "Nacional San Roque", value: TIPO_PEDIDO_NACIONAL_SAN_ROQUE },
+  { label: "Contenedor",             value: TIPO_PEDIDO_CONTENEDOR },
+  { label: "Contenedor · San Roque", value: TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE },
+  { label: "Camión",                 value: TIPO_PEDIDO_CAMION },
+  { label: "Camión · San Roque",     value: TIPO_PEDIDO_CAMION_SAN_ROQUE },
 ];
 
 export const FLUJO_LABELS: Record<TipoPedido, string> = {
-  [TIPO_PEDIDO_EXPORTACION]:        "Exportación",
-  [TIPO_PEDIDO_NACIONAL]:           "Nacional",
-  [TIPO_PEDIDO_NACIONAL_SAN_ROQUE]: "Nacional · San Roque",
+  [TIPO_PEDIDO_CONTENEDOR]:             "Contenedor",
+  [TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE]:  "Contenedor · San Roque",
+  [TIPO_PEDIDO_CAMION]:                "Camión",
+  [TIPO_PEDIDO_CAMION_SAN_ROQUE]:      "Camión · San Roque",
 };
 
-export const isFlujoNacional = (tipo: TipoPedido): boolean =>
-  tipo === TIPO_PEDIDO_NACIONAL || tipo === TIPO_PEDIDO_NACIONAL_SAN_ROQUE;
+export const esAparienciaCamion = (tipo: TipoPedido): boolean =>
+  tipo === TIPO_PEDIDO_CAMION || tipo === TIPO_PEDIDO_CAMION_SAN_ROQUE;
+
+export const esAparienciaContenedor = (tipo: TipoPedido): boolean =>
+  tipo === TIPO_PEDIDO_CONTENEDOR || tipo === TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE;
+
+export const esOrigenSanRoque = (tipo: TipoPedido): boolean =>
+  tipo === TIPO_PEDIDO_CONTENEDOR_SAN_ROQUE || tipo === TIPO_PEDIDO_CAMION_SAN_ROQUE;
 
 export const DOCUMENTOS_ERRORS = {
   NO_CONTAINERS_SELECTED: "Selecciona al menos un contenedor.",
@@ -164,10 +183,16 @@ export const IDIOMA_OPTIONS: Array<{ label: string; value: Idioma }> = [
 export const DEFAULT_IDIOMA: Idioma = "ES";
 
 export const DEFAULT_FILTROS = {
-  empresa:         "",
-  etd_desde:       null,
-  etd_hasta:       null,
-  eta_desde:       null,
-  eta_hasta:       null,
   tipos_documento: [] as string[],
 };
+
+// Propiedades de la Company que se muestran en la sección fija (CrmDataHighlight)
+// de la empresa del contexto, en los tres tabs. Alineado con Pedidos.
+export const COMPANY_HIGHLIGHT_PROPS = [
+  "name",
+  "cif",
+  "tipo_cliente",
+  "residennum",
+  "phone",
+  "credito_concedido",
+];

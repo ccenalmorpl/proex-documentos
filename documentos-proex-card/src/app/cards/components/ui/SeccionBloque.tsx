@@ -20,6 +20,8 @@ interface SeccionBloqueProps {
   destacada?: boolean;
   badge?: React.ReactNode;
   tagVariantOverride?: TagVariant;
+  /** Aún no se ha aprobado el envío de documentación al cliente (etapa de Envío). */
+  envioNoPermitido?: boolean;
 }
 
 export const SeccionBloque: React.FC<SeccionBloqueProps> = ({
@@ -32,6 +34,7 @@ export const SeccionBloque: React.FC<SeccionBloqueProps> = ({
   destacada = false,
   badge,
   tagVariantOverride,
+  envioNoPermitido = false,
 }) => {
   const computedDefaultAbierta = defaultAbierta ?? false;
   const [abierta, setAbierta] = useState(computedDefaultAbierta);
@@ -58,9 +61,12 @@ export const SeccionBloque: React.FC<SeccionBloqueProps> = ({
           <Text format={{ fontWeight: "bold" }} inline={true}>{titulo}</Text>
         </Box>
         <Box alignSelf="start" flex={1}>
-          {badge && badge}
-          {bloqueada && <Tag variant="error">Bloqueado</Tag>}
-          {destacada && !bloqueada && estado !== "pasada" && <Tag variant="warning">Requiere atención</Tag>}
+          <Flex direction="row" gap="extra-small" wrap="wrap" align="center">
+            {envioNoPermitido && <Tag variant="error">NO PERMITIDO ENVÍO</Tag>}
+            {badge && badge}
+            {bloqueada && <Tag variant="error">Bloqueado</Tag>}
+            {destacada && !bloqueada && estado !== "pasada" && <Tag variant="warning">Requiere atención</Tag>}
+          </Flex>
         </Box>
         <Box alignSelf="start">
           <Button

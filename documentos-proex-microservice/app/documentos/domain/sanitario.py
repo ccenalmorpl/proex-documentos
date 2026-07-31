@@ -1,11 +1,14 @@
+import logging
 from collections import OrderedDict
 from datetime import datetime
 from decimal import Decimal
-from typing import List
+from typing import Dict, List, Optional
 
 from app.core.config import Settings
-from app.core.constants import TRANSLATIONS
+from app.core.constants import LANG_TO_NOMBRE_COLUMN, TRANSLATIONS
 from app.documentos.domain.origen import _safe_decimal, format_european_number
+
+logger = logging.getLogger(__name__)
 
 
 def _peso_efectivo(element: dict, total_key: str, unitario_key: str) -> Decimal:
@@ -23,11 +26,20 @@ def build_sanitario_payload(
     elementos_by_container: dict,
     settings: Settings,
     idioma: str = "ES",
+    formato_labels: Optional[Dict[str, str]] = None,
 ) -> dict:
-    """Construye el payload para Certificado Sanitario. `deal_props["puerto_destino"]` debe llegar ya resuelto a label visible."""
+    """Construye el payload para Certificado Sanitario. `deal_props["puerto_destino"]` debe llegar ya resuelto a label visible.
 
-    lang = idioma if idioma in TRANSLATIONS else "ES"
+    `formato_labels` mapea el valor interno de `elemento.formato` (select) al
+    nombre traducido del idioma elegido (HubDB `formato_producto`). Si falta o
+    no contiene el valor, se conserva el valor interno crudo.
+    """
+
+    lang = (idioma or "ES").strip().upper()
+    if lang not in TRANSLATIONS:
+        lang = "ES"
     t = TRANSLATIONS[lang]
+    formato_labels = formato_labels or {}
 
     contenedores_list = [
         {
@@ -54,7 +66,13 @@ def build_sanitario_payload(
                 nombre = nombre.replace(n, "")
         return nombre.strip()
 
-    _lang_field = {"en": "nombre_en", "fr": "nombre_fr", "es": "nombre_es"}.get(lang, "nombre_es")
+    _lang_field = LANG_TO_NOMBRE_COLUMN.get(lang, "nombre_es")
+
+    logger.info(
+        "[sanitario_formato] idioma=%r lang=%r formato_labels=%d claves=%r",
+        idioma, lang, len(formato_labels), list(formato_labels.keys())[:10],
+    )
+    _formato_debug: list = []
 
     product_map: "OrderedDict[str, dict]" = OrderedDict()
     for cid in container_ids:
@@ -62,7 +80,9 @@ def build_sanitario_payload(
             nombre_lang = (e.get(_lang_field) or "").strip()
             nombre_base = nombre_lang if nombre_lang else (e.get("nombre") or "").strip()
             descripcion = _strip_nombre(nombre_base)
-            formato = (e.get("formato") or "").strip()
+            formato_raw = (e.get("formato") or "").strip()
+            formato = formato_labels.get(formato_raw, formato_raw)
+            _formato_debug.append((formato_raw, formato, formato_raw in formato_labels))
             marca   = (e.get("marca")   or "").strip()
             if descripcion not in product_map:
                 product_map[descripcion] = {
@@ -84,6 +104,11 @@ def build_sanitario_payload(
         }
         for desc, vals in product_map.items()
     ]
+
+    logger.info(
+        "[sanitario_formato] resolución por elemento (raw, resuelto, ¿match?): %r",
+        _formato_debug,
+    )
 
     formatos_unicos = list(
         dict.fromkeys(

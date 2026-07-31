@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Box,
   Flex,
@@ -6,6 +6,7 @@ import {
   Button,
   Checkbox,
   Select,
+  TextArea,
   Alert,
   StatusTag,
   Divider,
@@ -16,6 +17,7 @@ import {
 } from "@hubspot/ui-extensions";
 
 import { SeccionBloque, type EstadoEtapa } from "./ui/SeccionBloque";
+import { formatDateES } from "../utils/documentos.utils";
 import type { BLArchivo, EstadoBL, SelectOption } from "../utils/documentos.utils";
 import {
   buildUploadModalUri,
@@ -33,6 +35,10 @@ interface BLAccordionProps {
   onChange: (next: EstadoBL) => void;
   onUpdated: () => void | Promise<void>;
   requerido: boolean;
+  /** Subconjunto del embarque al que replicar el BL; vacío = todos los del pedido. */
+  contenedorIdsDestino?: string[];
+  /** Aún no se ha aprobado el envío de documentación al cliente. */
+  envioNoPermitido?: boolean;
 }
 
 const FileRow: React.FC<{
@@ -80,6 +86,9 @@ const FileRow: React.FC<{
         </>
       )}
     </Flex>
+    {archivo?.created_at && (
+      <Text variant="microcopy">Subido el {formatDateES(archivo.created_at)}</Text>
+    )}
   </Flex>
 );
 
@@ -93,9 +102,21 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
   onChange,
   onUpdated,
   requerido,
+  contenedorIdsDestino,
+  envioNoPermitido,
 }) => {
   const [deletingFileIds, setDeletingFileIds] = useState<Set<string>>(new Set());
   const [uploadingTipos,  setUploadingTipos]  = useState<Set<string>>(new Set());
+  // Texto libre: se edita en local y se persiste al perder el foco (no por tecla).
+  const [cambios, setCambios] = useState<string>(estado.cambiosEnBL ?? "");
+  useEffect(() => {
+    setCambios(estado.cambiosEnBL ?? "");
+  }, [estado.cambiosEnBL]);
+
+  // Subir SIEMPRE al conjunto seleccionado (consistente con cert/otros/embarque).
+  const tieneSeleccion = !!contenedorIdsDestino && contenedorIdsDestino.length > 0;
+  const esSubconjuntoParcial =
+    tieneSeleccion && contenedorIdsDestino!.length < numContenedores;
 
   if (!requerido) {
     return (
@@ -114,8 +135,9 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
   }
 
   const tieneBorrador     = !!estado.borrador;
-  const ambasValidaciones =
-    estado.enviadoCliente && estado.validadoAdministracion && estado.validadoLogistica;
+  // El tipo de emisión lo abre administración: basta con el envío a cliente y su
+  // validación. La validación de logística es informativa y ya no bloquea esta etapa.
+  const puedeElegirTipo   = estado.enviadoCliente && estado.validadoAdministracion;
   const tipoSeleccionado  = !!estado.tipo;
   const tieneFinal        = !!estado.final;
 
@@ -127,7 +149,7 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
   let currentStep = 0;
   if (tieneFinal)              currentStep = 3;
   else if (tipoSeleccionado)   currentStep = 2;
-  else if (ambasValidaciones)  currentStep = 1;
+  else if (puedeElegirTipo)    currentStep = 1;
   else                         currentStep = 0;
 
   const seccionEstado: EstadoEtapa = tieneFinal
@@ -144,7 +166,10 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
     const snapshot = estado;
     onChange(optimistic);
     try {
-      const resp = await updatePedidoBL(numeroPedido, companyId, payload);
+      const resp = await updatePedidoBL(
+        numeroPedido, companyId, payload,
+        tieneSeleccion ? contenedorIdsDestino : undefined,
+      );
       if (resp && resp.success === false) {
         throw new Error(resp.error ?? "PATCH respondió sin éxito");
       }
@@ -195,6 +220,16 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
     );
   };
 
+  const handleBlurCambios = (v: string) => {
+    const next = v ?? "";
+    if (next === (estado.cambiosEnBL ?? "")) return;
+    patchProp(
+      { cambios_en_bl: next },
+      { ...estado, cambiosEnBL: next },
+      next ? "Cambios solicitados en el BL guardados" : "Cambios solicitados en el BL borrados",
+    );
+  };
+
   const tipoToTipoDocumento = (tipo: "borrador" | "final"): string =>
     tipo === "borrador" ? "bl_borrador" : "bl_final";
 
@@ -217,7 +252,13 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
     });
     actions.openIframeModal(
       {
-        uri: buildUploadModalUri(numeroPedido, companyId, tipoDocumento),
+        uri: buildUploadModalUri(
+          numeroPedido,
+          companyId,
+          tipoDocumento,
+          undefined,
+          tieneSeleccion ? contenedorIdsDestino : undefined,
+        ),
         title: tipo === "borrador" ? "Subir borrador BL" : "Subir BL final",
         width: 640,
         height: 520,
@@ -250,7 +291,14 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
       return next;
     });
     try {
-      await deletePedidoFile(numeroPedido, companyId, archivo.file_id, tipoDocumento);
+      await deletePedidoFile(
+        numeroPedido,
+        companyId,
+        archivo.file_id,
+        tipoDocumento,
+        undefined,
+        tieneSeleccion ? contenedorIdsDestino : undefined,
+      );
       await onUpdated();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -274,11 +322,14 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
       titulo="Bill of Lading (BL)"
       estado={seccionEstado}
       defaultAbierta={seccionEstado !== "pasada"}
+      envioNoPermitido={envioNoPermitido}
       badge={tipoLbl ? <Tag variant="info">{tipoLbl}</Tag> : undefined}
     >
       <Flex direction="column" gap="small">
-        <Alert title="Información compartida con el pedido" variant="info">
-          El BL se gestiona a nivel de pedido. Los cambios aquí se aplican a los {numContenedores} contenedores del pedido.
+        <Alert title="BL del embarque seleccionado" variant="info">
+          {esSubconjuntoParcial
+            ? `El BL (validaciones, tipo, borrador y cambios solicitados) se guarda en los ${contenedorIdsDestino!.length} contenedores seleccionados (de ${numContenedores}), en su Negocio Documento y su Negocio Pedido.`
+            : `El BL (validaciones, tipo, borrador y cambios solicitados) se guarda en los ${tieneSeleccion ? contenedorIdsDestino!.length : numContenedores} contenedores seleccionados, en su Negocio Documento y su Negocio Pedido.`}
         </Alert>
 
         <StepIndicator
@@ -337,12 +388,12 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
                 options={tipoOptions}
                 onChange={handleChangeTipo}
                 placeholder="Seleccionar..."
-                readOnly={!ambasValidaciones}
+                readOnly={!puedeElegirTipo}
               />
               <Text variant="microcopy">
-                {ambasValidaciones
+                {puedeElegirTipo
                   ? "Admin elige el tipo tras confirmar el borrador con el cliente."
-                  : "Marca antes 'Enviado a cliente', 'Validado por administración' y 'Validado por logística'."}
+                  : "Marca antes 'Enviado a cliente' y 'Validado por administración'."}
               </Text>
             </Flex>
           </Box>
@@ -359,6 +410,27 @@ const BLAccordion: React.FC<BLAccordionProps> = ({
               disabledReason="Selecciona antes el tipo de BL"
             />
           </Box>
+        </Flex>
+
+        <Divider />
+
+        <Flex direction="column" gap="extra-small">
+          <Text format={{ fontWeight: "demibold" }}>Cambios solicitados en el BL</Text>
+          <TextArea
+            label=""
+            name="cambios_en_bl"
+            value={cambios}
+            onChange={setCambios}
+            onBlur={handleBlurCambios}
+            rows={3}
+            placeholder="Anota los cambios que el cliente o la naviera solicitan sobre el BL…"
+            readOnly={!tieneBorrador}
+          />
+          <Text variant="microcopy">
+            {tieneBorrador
+              ? "Texto libre. Se guarda al salir del campo, en los contenedores seleccionados."
+              : "Disponible cuando haya un borrador de BL."}
+          </Text>
         </Flex>
       </Flex>
     </SeccionBloque>

@@ -28,6 +28,8 @@ class FileMetadata:
     file_id: str
     name: str
     url: Optional[str]
+    # createdAt (ISO-8601) del fichero en HubSpot: fecha de subida real.
+    created_at: Optional[str] = None
 
 
 def fetch_file_metadata(file_id: str) -> Optional[FileMetadata]:
@@ -44,6 +46,7 @@ def fetch_file_metadata(file_id: str) -> Optional[FileMetadata]:
             file_id=str(data.get("id") or file_id),
             name=str(data.get("name") or ""),
             url=data.get("url"),
+            created_at=data.get("createdAt"),
         )
     except Exception as e:
         logger.warning(f"[FILE_METADATA] fallo file_id={file_id!r}: {e}")

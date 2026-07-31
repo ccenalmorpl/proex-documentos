@@ -3,7 +3,7 @@ from collections import Counter
 from decimal import Decimal, InvalidOperation
 from typing import List
 
-from app.core.constants import CONTAINER_TYPE_DISPLAY, TRANSLATIONS
+from app.core.constants import CONTAINER_TYPE_DISPLAY, LANG_TO_NOMBRE_COLUMN, TRANSLATIONS
 
 
 def _safe_decimal(v) -> Decimal:
@@ -30,7 +30,9 @@ def build_origen_payload(
 ) -> dict:
     """Construye el payload para Certificado de Origen. Borrador y Final comparten payload; difieren solo en plantilla."""
 
-    lang = idioma if idioma in TRANSLATIONS else "ES"
+    lang = (idioma or "ES").strip().upper()
+    if lang not in TRANSLATIONS:
+        lang = "ES"
     t = TRANSLATIONS[lang]
 
     nombres = [
@@ -60,7 +62,7 @@ def build_origen_payload(
             resumen_partes.append(f"{cantidad} X {tipo_code}")
     resumen_texto = "  ".join(resumen_partes)
 
-    _lang_field = {"en": "nombre_en", "fr": "nombre_fr", "es": "nombre_es"}.get(lang, "nombre_es")
+    _lang_field = LANG_TO_NOMBRE_COLUMN.get(lang, "nombre_es")
 
     product_map: dict[str, dict] = {}
     for cid in container_ids:

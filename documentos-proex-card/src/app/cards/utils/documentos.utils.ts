@@ -3,10 +3,12 @@ import {
   DOC_TYPE_TO_API,
   OTROS_DOC_LABELS,
   OTROS_DOC_SUBIBLES_DISCRIMINADOS,
+  OTROS_DOC_TYPE_CARTA_PORTE,
   OTROS_DOC_TYPE_OTROS,
+  OTROS_DOC_TYPE_PACKING_LIST,
   OTROS_DOC_TYPE_WAIVER,
-  TIPO_PEDIDO_EXPORTACION,
-  isFlujoNacional,
+  TIPO_PEDIDO_CONTENEDOR,
+  esAparienciaContenedor,
   type Idioma,
   type TipoPedido,
 } from "../constants/documentos.constants";
@@ -15,11 +17,6 @@ import {
 export type BaseDate = { year: number; month: number; date: number };
 
 export interface FiltrosState {
-  empresa: string;
-  etd_desde: BaseDate | null;
-  etd_hasta: BaseDate | null;
-  eta_desde: BaseDate | null;
-  eta_hasta: BaseDate | null;
   tipos_documento: string[];
 }
 
@@ -34,7 +31,6 @@ export interface DocInfo {
 export interface ContenedorItem {
   id: string;
   name: string;
-  nombre_cliente?: string;
   etd?: string;
   eta?: string;
   deal_id?: string | null;
@@ -70,6 +66,7 @@ export interface BLArchivo {
   name: string;
   url: string | null;
   tipo: "borrador" | "final" | "desconocido";
+  created_at?: string | null;
 }
 
 export interface CertificadoArchivo {
@@ -77,6 +74,7 @@ export interface CertificadoArchivo {
   name: string;
   url: string | null;
   tipo: "borrador" | "validado" | "sellado" | "desconocido";
+  created_at?: string | null;
 }
 
 export type OtroDocTipoDiscriminado =
@@ -95,12 +93,15 @@ export interface OtroDocArchivo {
   name: string;
   url: string | null;
   tipo: OtroDocTipo;
+  created_at?: string | null;
 }
 
 export interface ArchivoSimple {
   file_id: string;
   name: string;
   url: string | null;
+  // Fecha de subida (ISO YYYY-MM-DD) derivada del createdAt del fichero en HubSpot.
+  created_at?: string | null;
 }
 
 export interface DealFile {
@@ -121,6 +122,7 @@ export interface PedidoDetalleInfo {
   notify: string | null;
   puerto_destino: string | null;
   puerto_salida: string | null;
+  tipo_de_venta: string | null;
   descripcion_mercancia: string | null;
   observaciones: string | null;
   fecha_de_entrega: string | null;
@@ -136,6 +138,8 @@ export interface PedidoDetalleInfo {
   bl_archivos: BLArchivo[];
   certificado_origen_validado: boolean;
   certificado_sanitario_validado: boolean;
+  certificado_origen_enviar_a_firmar: boolean;
+  certificado_sanitario_enviar_a_firmar: boolean;
   origen_archivos: CertificadoArchivo[];
   sanitario_archivos: CertificadoArchivo[];
   factura_pedido: DealFile | null;
@@ -144,6 +148,8 @@ export interface PedidoDetalleInfo {
   fecha_de_facturacion_pedido: string | null;
   fecha_de_vencimiento_factura: string | null;
   numero_de_factura: string | null;
+  // Cambio 2 — el booking es individual por contenedor (PedidoDetalleContenedor.numero_de_booking);
+  // ya no se usa a nivel de cabecera.
 }
 
 export interface PedidoDetalleEmpresa {
@@ -165,6 +171,11 @@ export interface PedidoDetalleContenedor {
   eta: string | null;
   tipo_contenedor: string | null;
   total_cajas: string | null;
+  // Transitario asignado al pedido-deal del contenedor (readonly, solo se muestra).
+  // En modo doble flete (camión con tramo marítimo) `transitario` es el marítimo
+  // y `transitario_terrestre` el terrestre; en legacy solo viene el primero.
+  transitario?: string | null;
+  transitario_terrestre?: string | null;
   descripcion_mercancia_agregada: string | null;
   documentos_a_generar: string[];
   importe_pendiente_cobro: string | null;
@@ -179,6 +190,34 @@ export interface PedidoDetalleContenedor {
   waiver_validado: boolean;
   fecha_llegada_contenedor: string | null;
   fecha_retirada_mercancia: string | null;
+  // Envío por mensajería — gestión de administración. datos_envio_mensajeria es
+  // editable; albaran_mensajeria es la subida real del albarán de recogida.
+  datos_envio_mensajeria?: string | null;
+  albaran_mensajeria?: ArchivoSimple | null;
+  // Cambio 2 — datos de factura de SAP por contenedor (solo lectura).
+  numero_de_factura: string | null;
+  fecha_de_vencimiento_factura: string | null;
+  // Cambio 2 — booking INDIVIDUAL por contenedor (sin fallback al del pedido).
+  // Conduce el agrupado por embarque.
+  numero_de_booking?: string | null;
+  // Cambio 2 — documentos de cabecera por contenedor (factura/packing/carta de porte).
+  // Cada contenedor genera los suyos (Fase 2). Si el backend aún no los expone por
+  // contenedor, se cae al valor compartido del pedido (pedidoInfo).
+  factura_pedido?: DealFile | null;
+  packing_list_pedido?: DealFile | null;
+  carta_porte_pedido?: DealFile | null;
+  // BL por contenedor: el backend lo lee del Negocio Documento (autoritativo) con
+  // fallback al Negocio Pedido. La escritura aplica solo a los seleccionados.
+  bl_validado_logistica?: boolean;
+  bl_validado_administracion?: boolean;
+  bl_enviado_cliente?: boolean;
+  tipo_de_bl?: string | null;
+  cambios_en_bl?: string | null;
+  bl_archivos?: BLArchivo[];
+  // Negocio Documento del contenedor: si no existe, el pedido aún no completó su
+  // pipeline y el contenedor no es gestionable en este asistente.
+  tiene_negocio_documento: boolean;
+  documento_dealstage?: string | null;
 }
 
 export interface PedidoDetalle {
@@ -192,9 +231,6 @@ export interface PedidoDetalle {
   select_options?: Record<string, SelectOption[]>;
 }
 
-export interface FileSlot {
-  filename: string | null;
-}
 
 export interface PedidoInfo {
   etd: string | null;
@@ -205,6 +241,7 @@ export interface PedidoInfo {
   total_cajas_pedido: number | null;
   puerto_destino: string;
   puerto_salida: string;
+  tipo_de_venta: string;
   descripcion_mercancia: string;
   fecha_de_entrega: string | null;
   lugar_carga: string;
@@ -241,19 +278,20 @@ export interface PedidoMock {
   documentos_a_generar: string[];
   estado_cobro: "pendiente" | "cobrado";
   importe_pendiente?: number;
-  estado_bl: EstadoBL;
+  // El BL es por contenedor (estadosContenedor[cid].bl); ya no se guarda a nivel de pedido.
   estado_origen: EstadoCertificado;
   estado_sanitario: EstadoCertificado;
   select_options: Record<string, SelectOption[]>;
 }
 
-export const DEFAULT_TIPO_PEDIDO: TipoPedido = TIPO_PEDIDO_EXPORTACION;
+export const DEFAULT_TIPO_PEDIDO: TipoPedido = TIPO_PEDIDO_CONTENEDOR;
 
 export interface EstadoCertificado {
   borrador: CertificadoArchivo | null;
   validadoCliente: boolean;
   validado: CertificadoArchivo | null;
   sellado: CertificadoArchivo | null;
+  enviarAFirmar: boolean;
 }
 
 export interface EstadoBL {
@@ -262,13 +300,16 @@ export interface EstadoBL {
   validadoAdministracion: boolean;
   enviadoCliente: boolean;
   tipo: string | null;
+  cambiosEnBL: string | null;
   final: BLArchivo | null;
 }
 
 export interface EstadoEntrega {
   enviarPorMensajeria: boolean;
   permitirEnviar: boolean;
-  albaranMensajeria: FileSlot;
+  // Datos de gestión de administración para la mensajería (nº copias, dirección de
+  // envío, contacto). Editable y bulk a los contenedores seleccionados.
+  datosEnvioMensajeria: string;
   documentacionRecibida: boolean;
   fechaLlegadaContenedor: BaseDate | null;
   mercanciaRetirada: boolean;
@@ -289,11 +330,10 @@ export interface EstadoOtrosDocs {
 }
 
 export interface EstadoContenedor {
+  bl: EstadoBL;
   otrosDocs: EstadoOtrosDocs;
   entrega: EstadoEntrega;
 }
-
-export const emptyFileSlot = (): FileSlot => ({ filename: null });
 
 export const initialEstadoOtrosDocs = (): EstadoOtrosDocs => ({
   dua:            null,
@@ -333,6 +373,7 @@ export const initialCertificado = (): EstadoCertificado => ({
   validadoCliente: false,
   validado:        null,
   sellado:         null,
+  enviarAFirmar:   false,
 });
 
 export const buildEstadoOrigen = (info: Partial<PedidoDetalleInfo>): EstadoCertificado => {
@@ -342,6 +383,7 @@ export const buildEstadoOrigen = (info: Partial<PedidoDetalleInfo>): EstadoCerti
     validadoCliente: info.certificado_origen_validado ?? false,
     validado:        archivos.find((a) => a.tipo === "validado") ?? null,
     sellado:         archivos.find((a) => a.tipo === "sellado") ?? null,
+    enviarAFirmar:   info.certificado_origen_enviar_a_firmar ?? false,
   };
 };
 
@@ -352,6 +394,7 @@ export const buildEstadoSanitario = (info: Partial<PedidoDetalleInfo>): EstadoCe
     validadoCliente: info.certificado_sanitario_validado ?? false,
     validado:        archivos.find((a) => a.tipo === "validado") ?? null,
     sellado:         archivos.find((a) => a.tipo === "sellado") ?? null,
+    enviarAFirmar:   info.certificado_sanitario_enviar_a_firmar ?? false,
   };
 };
 
@@ -361,17 +404,23 @@ export const initialBL = (): EstadoBL => ({
   validadoAdministracion: false,
   enviadoCliente:         false,
   tipo:                   null,
+  cambiosEnBL:            null,
   final:                  null,
 });
 
-export const buildEstadoBL = (info: Partial<PedidoDetalleInfo>): EstadoBL => {
-  const archivos = info.bl_archivos ?? [];
+// El BL es por contenedor: se lee del item de contenedor (Negocio Documento
+// autoritativo, con fallback al Pedido, ya resuelto en el backend).
+export const buildEstadoBLFromContenedor = (
+  c: Partial<PedidoDetalleContenedor>,
+): EstadoBL => {
+  const archivos = c.bl_archivos ?? [];
   return {
     borrador:               archivos.find((a) => a.tipo === "borrador") ?? null,
-    validadoLogistica:      info.bl_validado_logistica ?? false,
-    validadoAdministracion: info.bl_validado_administracion ?? false,
-    enviadoCliente:         info.bl_enviado_cliente ?? false,
-    tipo:                   info.tipo_de_bl ?? null,
+    validadoLogistica:      c.bl_validado_logistica ?? false,
+    validadoAdministracion: c.bl_validado_administracion ?? false,
+    enviadoCliente:         c.bl_enviado_cliente ?? false,
+    tipo:                   c.tipo_de_bl ?? null,
+    cambiosEnBL:            c.cambios_en_bl ?? null,
     final:                  archivos.find((a) => a.tipo === "final") ?? null,
   };
 };
@@ -379,7 +428,7 @@ export const buildEstadoBL = (info: Partial<PedidoDetalleInfo>): EstadoBL => {
 export const initialEntrega = (): EstadoEntrega => ({
   enviarPorMensajeria:    false,
   permitirEnviar:         false,
-  albaranMensajeria:      emptyFileSlot(),
+  datosEnvioMensajeria:   "",
   documentacionRecibida:  false,
   fechaLlegadaContenedor: null,
   mercanciaRetirada:      false,
@@ -405,7 +454,7 @@ export const buildEstadoEntrega = (
 ): EstadoEntrega => ({
   enviarPorMensajeria:    c.enviar_por_mensajeria ?? false,
   permitirEnviar:         c.permitir_enviar_documentacion ?? false,
-  albaranMensajeria:      emptyFileSlot(),
+  datosEnvioMensajeria:   c.datos_envio_mensajeria ?? "",
   documentacionRecibida:  c.documentacion_recibida ?? false,
   fechaLlegadaContenedor: isoToBaseDate(c.fecha_llegada_contenedor),
   mercanciaRetirada:      c.mercancia_retirada ?? false,
@@ -413,17 +462,10 @@ export const buildEstadoEntrega = (
 });
 
 export const initialEstadoContenedor = (): EstadoContenedor => ({
+  bl:        initialBL(),
   otrosDocs: initialEstadoOtrosDocs(),
   entrega:   initialEntrega(),
 });
-
-// month es 0-indexed en BaseDate
-const baseDateToISO = (d: BaseDate | null): string | null => {
-  if (!d) return null;
-  const m = String(d.month + 1).padStart(2, "0");
-  const day = String(d.date).padStart(2, "0");
-  return `${d.year}-${m}-${day}`;
-};
 
 export const formatDateES = (value: string | null | undefined): string => {
   if (!value) return "";
@@ -476,14 +518,13 @@ export const daysUntil = (value: string | null | undefined): number | null => {
   return Math.ceil((d.getTime() - todayUTC().getTime()) / MS_PER_DAY);
 };
 
-export const buildPendingPayload = (dealId: string, filtros: FiltrosState) => ({
-  deal_id: String(dealId),
+// La card vive en una Company: el filtrado es SIEMPRE por la empresa del contexto
+// (companyId), no por texto. deal_id se mantiene por compat del contrato (el
+// backend no lo usa para filtrar).
+export const buildPendingPayload = (companyId: string, filtros: FiltrosState) => ({
+  deal_id: String(companyId),
   filtros: {
-    empresa:         filtros.empresa || null,
-    etd_desde:       baseDateToISO(filtros.etd_desde),
-    etd_hasta:       baseDateToISO(filtros.etd_hasta),
-    eta_desde:       baseDateToISO(filtros.eta_desde),
-    eta_hasta:       baseDateToISO(filtros.eta_hasta),
+    company_id:      String(companyId),
     tipos_documento: filtros.tipos_documento.length ? filtros.tipos_documento : null,
   },
 });
@@ -504,8 +545,8 @@ export const buildGeneratePayload = (
   ...(observaciones ? { observaciones } : {}),
 });
 
-export const buildGeneratedPayload = (dealId: string, filtros: FiltrosState) =>
-  buildPendingPayload(dealId, filtros);
+export const buildGeneratedPayload = (companyId: string, filtros: FiltrosState) =>
+  buildPendingPayload(companyId, filtros);
 
 export const buildRollbackPayload = (
   contenedorNombre: string,
@@ -622,66 +663,87 @@ export const buildDocumentosContenedorResumen = (params: {
   const { contenedor, pedidoInfo, tipoPedido, fotosDeCarga } = params;
   const result: DocStatus[] = [];
 
-  if (!isFlujoNacional(tipoPedido)) {
-    const blFinal = pedidoInfo.bl_archivos.find((a) => a.tipo === "final") ?? null;
-    result.push({
-      key:      "bl_final",
-      label:    "BL final",
-      generado: !!blFinal,
-      url:      blFinal?.url ?? null,
-      filename: blFinal?.name ?? null,
-    });
+  // Solo se muestran los documentos que el contenedor tiene marcados en
+  // `documentos_a_generar` (o que ya estén generados): nada se pinta fijo.
+  const docsAGenerar = contenedor.documentos_a_generar ?? [];
+
+  if (esAparienciaContenedor(tipoPedido)) {
+    // BL final POR CONTENEDOR (autoritativo desde su Negocio Documento), no el del
+    // pedido compartido: cada contenedor puede tener su propio BL.
+    const blFinal = (contenedor.bl_archivos ?? []).find((a) => a.tipo === "final") ?? null;
+    if (docsAGenerar.includes("bl") || blFinal) {
+      result.push({
+        key:      "bl_final",
+        label:    "BL final",
+        generado: !!blFinal,
+        url:      blFinal?.url ?? null,
+        filename: blFinal?.name ?? null,
+      });
+    }
 
     const origenSellado = pedidoInfo.origen_archivos.find((a) => a.tipo === "sellado") ?? null;
-    result.push({
-      key:      "origen_sellado",
-      label:    "Certificado de Origen",
-      generado: !!origenSellado,
-      url:      origenSellado?.url ?? null,
-      filename: origenSellado?.name ?? null,
-    });
+    if (docsAGenerar.includes("certificado_de_origen") || origenSellado) {
+      result.push({
+        key:      "origen_sellado",
+        label:    "Certificado de Origen",
+        generado: !!origenSellado,
+        url:      origenSellado?.url ?? null,
+        filename: origenSellado?.name ?? null,
+      });
+    }
 
     const sanitarioSellado = pedidoInfo.sanitario_archivos.find((a) => a.tipo === "sellado") ?? null;
-    result.push({
-      key:      "sanitario_sellado",
-      label:    "Certificado Sanitario",
-      generado: !!sanitarioSellado,
-      url:      sanitarioSellado?.url ?? null,
-      filename: sanitarioSellado?.name ?? null,
-    });
+    if (docsAGenerar.includes("certificado_sanitario") || sanitarioSellado) {
+      result.push({
+        key:      "sanitario_sellado",
+        label:    "Certificado Sanitario",
+        generado: !!sanitarioSellado,
+        url:      sanitarioSellado?.url ?? null,
+        filename: sanitarioSellado?.name ?? null,
+      });
+    }
   }
+
+  // Cabecera POR CONTENEDOR: el backend ya expone factura/packing/carta del
+  // pedido-deal del contenedor. No se cae al doc del pedido (sería el del primer
+  // contenedor y se mostraría como propio en los que aún no lo tienen).
+  const facturaFile     = contenedor.factura_pedido ?? null;
+  const packingFile     = contenedor.packing_list_pedido ?? null;
+  const cartaPorteFile  = contenedor.carta_porte_pedido ?? null;
 
   result.push({
     key:      "factura",
     label:    "Factura",
-    generado: !!pedidoInfo.factura_pedido?.url,
-    url:      pedidoInfo.factura_pedido?.url ?? null,
-    filename: pedidoInfo.factura_pedido?.name ?? null,
+    generado: !!facturaFile?.url,
+    url:      facturaFile?.url ?? null,
+    filename: facturaFile?.name ?? null,
   });
 
-  result.push({
-    key:      "packing_list",
-    label:    "Packing list",
-    generado: !!pedidoInfo.packing_list_pedido?.url,
-    url:      pedidoInfo.packing_list_pedido?.url ?? null,
-    filename: pedidoInfo.packing_list_pedido?.name ?? null,
-  });
-
-  if (pedidoInfo.carta_porte_pedido?.url) {
+  if (docsAGenerar.includes(OTROS_DOC_TYPE_PACKING_LIST) || packingFile?.url) {
     result.push({
-      key:      "carta_porte",
-      label:    "Carta de porte",
-      generado: true,
-      url:      pedidoInfo.carta_porte_pedido.url,
-      filename: pedidoInfo.carta_porte_pedido.name ?? null,
+      key:      "packing_list",
+      label:    "Packing list",
+      generado: !!packingFile?.url,
+      url:      packingFile?.url ?? null,
+      filename: packingFile?.name ?? null,
     });
   }
 
-  const docsAGenerar = contenedor.documentos_a_generar ?? [];
+  if (docsAGenerar.includes(OTROS_DOC_TYPE_CARTA_PORTE) || cartaPorteFile?.url) {
+    result.push({
+      key:      "carta_porte",
+      label:    "Carta de porte",
+      generado: !!cartaPorteFile?.url,
+      url:      cartaPorteFile?.url ?? null,
+      filename: cartaPorteFile?.name ?? null,
+    });
+  }
+
   for (const tipo of OTROS_DOC_SUBIBLES_DISCRIMINADOS) {
-    if (!docsAGenerar.includes(tipo)) continue;
     const archivo =
       contenedor.documentos_archivos.find((a) => a.tipo === tipo) ?? null;
+    // Se muestra si está marcado en documentos_a_generar O ya se subió.
+    if (!docsAGenerar.includes(tipo) && !archivo) continue;
     result.push({
       key:      tipo,
       label:    OTROS_DOC_LABELS[tipo] ?? tipo,
@@ -691,9 +753,9 @@ export const buildDocumentosContenedorResumen = (params: {
     });
   }
 
-  if (docsAGenerar.includes(OTROS_DOC_TYPE_WAIVER)) {
-    const waiverBorrador = contenedor.documentos_archivos.find((a) => a.tipo === "waiver_borrador") ?? null;
-    const waiverFinal    = contenedor.documentos_archivos.find((a) => a.tipo === "waiver_final") ?? null;
+  const waiverBorrador = contenedor.documentos_archivos.find((a) => a.tipo === "waiver_borrador") ?? null;
+  const waiverFinal    = contenedor.documentos_archivos.find((a) => a.tipo === "waiver_final") ?? null;
+  if (docsAGenerar.includes(OTROS_DOC_TYPE_WAIVER) || waiverBorrador || waiverFinal) {
     const completo = !!waiverBorrador && contenedor.waiver_validado === true && !!waiverFinal;
     result.push({
       key:      OTROS_DOC_TYPE_WAIVER,
@@ -704,7 +766,7 @@ export const buildDocumentosContenedorResumen = (params: {
     });
   }
 
-  if (docsAGenerar.includes(OTROS_DOC_TYPE_OTROS)) {
+  if (docsAGenerar.includes(OTROS_DOC_TYPE_OTROS) || contenedor.otros_documentos.length > 0) {
     const n = contenedor.otros_documentos.length;
     result.push({
       key:      "otros",
@@ -727,4 +789,97 @@ export const buildDocumentosContenedorResumen = (params: {
   }
 
   return result;
+};
+
+export type EstadoDocFila = "completo" | "en_progreso" | "pendiente" | "vacio";
+
+export interface ResumenDocFila {
+  estado: EstadoDocFila;
+  generados: number;
+  total: number;
+  label: string;
+  variant: "success" | "info" | "warning" | "default";
+}
+
+/** Estado agregado de la documentación de un contenedor, para el color de su fila. */
+export const resumenEstadoDocFila = (docs: DocStatus[]): ResumenDocFila => {
+  const total = docs.length;
+  const generados = docs.filter((d) => d.generado).length;
+  if (total === 0) {
+    return { estado: "vacio", generados, total, label: "Sin requisitos", variant: "default" };
+  }
+  if (generados === total) {
+    return { estado: "completo", generados, total, label: "Completo", variant: "success" };
+  }
+  if (generados === 0) {
+    return { estado: "pendiente", generados, total, label: `0/${total}`, variant: "warning" };
+  }
+  return { estado: "en_progreso", generados, total, label: `${generados}/${total}`, variant: "info" };
+};
+
+/** Booking del contenedor. Cambio 2 — el booking es individual por contenedor;
+ *  no se cae al del pedido (cada contenedor lleva el suyo, puede diferir por embarque). */
+export const bookingDeContenedor = (
+  contenedor: Pick<PedidoDetalleContenedor, "numero_de_booking">,
+): string | null => {
+  const propio = contenedor.numero_de_booking;
+  return propio && propio.trim() !== "" ? propio.trim() : null;
+};
+
+export interface DocsCabeceraContenedor {
+  factura: DealFile | null;
+  packing: DealFile | null;
+  cartaPorte: DealFile | null;
+}
+
+/** Documentos de cabecera (factura/packing/carta) del contenedor con fallback al pedido. */
+export const docsCabeceraDeContenedor = (
+  contenedor: Pick<
+    PedidoDetalleContenedor,
+    "factura_pedido" | "packing_list_pedido" | "carta_porte_pedido"
+  >,
+): DocsCabeceraContenedor => ({
+  // Por contenedor: el backend ya expone los docs de su pedido-deal. Sin fallback
+  // al pedido para no mostrar el doc del primer contenedor como propio.
+  factura:    contenedor.factura_pedido ?? null,
+  packing:    contenedor.packing_list_pedido ?? null,
+  cartaPorte: contenedor.carta_porte_pedido ?? null,
+});
+
+export interface CobroAcumulado {
+  precioTotal: number;
+  pendienteTotal: number;
+  porcentajePendiente: number;
+  cobradoCompleto: boolean;
+  precioDisponible: boolean;
+}
+
+/** Acumula precio/pendiente de varios contenedores para el resumen de cobro multi-contenedor. */
+export const acumularCobro = (
+  contenedores: Array<Pick<PedidoDetalleContenedor, "price" | "importe_pendiente_cobro">>,
+): CobroAcumulado => {
+  let precioTotal = 0;
+  let pendienteTotal = 0;
+  let precioDisponible = false;
+  for (const c of contenedores) {
+    const precio = parseFloatOrZero(c.price);
+    // Solo se acumulan los contenedores con precio informado, para que el % global
+    // no mezcle pendientes de contenedores sin precio con el total de precios.
+    if (precio > ESTADO_COBRO_TOLERANCIA) {
+      precioDisponible = true;
+      precioTotal += precio;
+      pendienteTotal += parseFloatOrZero(c.importe_pendiente_cobro);
+    }
+  }
+  const porcentajePendiente =
+    precioTotal > ESTADO_COBRO_TOLERANCIA
+      ? Math.max(0, Math.min(100, (pendienteTotal / precioTotal) * 100))
+      : 0;
+  return {
+    precioTotal,
+    pendienteTotal,
+    porcentajePendiente,
+    cobradoCompleto: precioDisponible && pendienteTotal <= ESTADO_COBRO_TOLERANCIA,
+    precioDisponible,
+  };
 };

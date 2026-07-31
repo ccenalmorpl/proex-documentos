@@ -3,6 +3,7 @@ OBJECT_TYPE_ELEMENTO   = "2-54989407"
 OBJECT_TYPE_DEAL       = "deals"
 OBJECT_TYPE_COMPANY    = "0-2"
 OBJECT_TYPE_PROVEEDOR  = "2-43108800"
+OBJECT_TYPE_RUTA       = "2-53295516"
 
 PEDIDO_PIPELINE_ID = "725914649"
 
@@ -16,16 +17,23 @@ DEAL_PROP_BL_VALIDADO_ADMINISTRACION = "bl_validado_administracion"
 DEAL_PROP_BL_ENVIADO_CLIENTE         = "bl_enviado_cliente"
 DEAL_PROP_TIPO_DE_BL                 = "tipo_de_bl"
 DEAL_PROP_BORRADOR_BL                = "borrador_bl"
+DEAL_PROP_NUMERO_DE_BOOKING          = "numero_de_booking"
+DEAL_PROP_CAMBIOS_EN_BL              = "cambios_en_bl"
 
 DEAL_PROP_FACTURA_DEL_PEDIDO       = "factura_del_pedido"
 DEAL_PROP_PACKING_LIST_PROEX       = "packing_list_proex"
 DEAL_PROP_CARTA_DE_PORTE_PROEX     = "carta_de_porte_proex"
 DEAL_PROP_FECHA_FACTURACION_PEDIDO = "fecha_de_facturacion_pedido"
 DEAL_PROP_FECHA_VENCIMIENTO_FACTURA = "fecha_de_vencimiento_factura"
+DEAL_PROP_NUMERO_DE_FACTURA        = "numero_de_factura"
 
 DEAL_PROP_FECHA_DE_ENTREGA      = "fecha_de_entrega"
 DEAL_PROP_DIRECCION_DE_ENTREGA  = "direccion_de_entrega"
 DEAL_PROP_DATOS_DEL_CHOFER      = "datos_del_chofer"
+DEAL_PROP_TRANSITARIO_DEL_PEDIDO = "transitario_del_pedido"
+# Doble transitario (camión + tramo marítimo): la prop legada pasa a significar
+# tramo marítimo/principal y esta lleva el terrestre. Puede no existir aún en el portal.
+DEAL_PROP_TRANSITARIO_TERRESTRE_DEL_PEDIDO = "transitario_terrestre_del_pedido"
 
 BL_FILE_PREFIX_BORRADOR = "borrador_BL_"
 BL_FILE_PREFIX_FINAL    = "final_BL_"
@@ -43,6 +51,8 @@ FILE_TYPE_ORIGEN_VALIDADO    = "origen_validado"
 FILE_TYPE_ORIGEN_SELLADO     = "origen_sellado"
 FILE_TYPE_SANITARIO_BORRADOR = "sanitario_borrador"
 FILE_TYPE_SANITARIO_VALIDADO = "sanitario_validado"
+FILE_TYPE_ALBARAN_MENSAJERIA = "albaran_mensajeria"
+ALBARAN_MENSAJERIA_PREFIX    = "albaran_mensajeria_"
 FILE_TYPE_SANITARIO_SELLADO  = "sanitario_sellado"
 
 CERT_ORIGEN_FOLDER    = "/documentos-proex/origen"
@@ -53,6 +63,8 @@ CONTENEDOR_PROP_CERT_ORIGEN             = "certificado_origen"
 CONTENEDOR_PROP_CERT_SANITARIO          = "certificado_sanitario"
 CONTENEDOR_PROP_CERT_ORIGEN_VALIDADO    = "certificado_origen_validado"
 CONTENEDOR_PROP_CERT_SANITARIO_VALIDADO = "certificado_sanitario_validado"
+CONTENEDOR_PROP_CERT_ORIGEN_ENVIAR_FIRMAR    = "certificado_origen_enviar_a_firmar"
+CONTENEDOR_PROP_CERT_SANITARIO_ENVIAR_FIRMAR = "certificado_sanitario_enviar_a_firmar"
 
 CONTENEDOR_PROP_DOCUMENTOS        = "documentos"
 CONTENEDOR_PROP_OTROS_DOCUMENTOS  = "otros_documentos"
@@ -60,12 +72,18 @@ CONTENEDOR_PROP_FOTOS_DE_CARGA    = "fotos_de_carga"
 CONTENEDOR_PROP_TIPO_CONTENEDOR   = "tipo_contenedor"
 CONTENEDOR_PROP_WAIVER_VALIDADO   = "waiver_validado"
 
-CONTENEDOR_PROP_ENVIAR_POR_MENSAJERIA         = "enviar_por_mensajeria"
+# El nombre interno real en HubSpot es `envio_por_mensajeria` (verificado contra
+# el portal); antes apuntaba a `enviar_por_mensajeria`, que no existe.
+CONTENEDOR_PROP_ENVIAR_POR_MENSAJERIA         = "envio_por_mensajeria"
 CONTENEDOR_PROP_PERMITIR_ENVIAR_DOCUMENTACION = "permitir_enviar_documentacion"
 CONTENEDOR_PROP_DOCUMENTACION_RECIBIDA        = "documentacion_recibida"
 CONTENEDOR_PROP_MERCANCIA_RETIRADA            = "mercancia_retirada"
 CONTENEDOR_PROP_FECHA_LLEGADA_CONTENEDOR      = "fecha_llegada_contenedor"
 CONTENEDOR_PROP_FECHA_RETIRADA_MERCANCIA      = "fecha_retirada_mercancia"
+# Envío por mensajería — gestión de administración: datos de admin (text) + albarán
+# de recogida (subida real). Sin fechas.
+CONTENEDOR_PROP_DATOS_ENVIO_MENSAJERIA          = "datos_envio_mensajeria"
+CONTENEDOR_PROP_ALBARAN_MENSAJERIA              = "albaran_mensajeria"
 
 CONTENEDOR_DOCS_FOLDER  = "/documentos-proex/contenedor-docs"
 OTROS_DOCS_FOLDER       = "/documentos-proex/otros-documentos"
@@ -76,6 +94,7 @@ CONTENEDOR_DOC_PREFIX_ARC              = "arc_"
 CONTENEDOR_DOC_PREFIX_EUR1             = "eur1_"
 CONTENEDOR_DOC_PREFIX_ANEXO_I          = "anexo_i_"
 CONTENEDOR_DOC_PREFIX_INSPECCION       = "inspeccion_"
+CONTENEDOR_DOC_PREFIX_SEGURO           = "seguro_"
 CONTENEDOR_DOC_PREFIX_WAIVER_BORRADOR  = "borrador_waiver_"
 CONTENEDOR_DOC_PREFIX_WAIVER_FINAL     = "final_waiver_"
 OTROS_DOCS_PREFIX     = "otros_"
@@ -86,6 +105,7 @@ FILE_TYPE_DOC_ARC              = "doc_arc"
 FILE_TYPE_DOC_EUR1             = "doc_eur1"
 FILE_TYPE_DOC_ANEXO_I          = "doc_anexo_i"
 FILE_TYPE_DOC_INSPECCION       = "doc_inspeccion"
+FILE_TYPE_DOC_SEGURO           = "doc_seguro"
 FILE_TYPE_DOC_WAIVER_BORRADOR  = "doc_waiver_borrador"
 FILE_TYPE_DOC_WAIVER_FINAL     = "doc_waiver_final"
 FILE_TYPE_OTRO_DOC             = "otro_doc"
@@ -229,6 +249,15 @@ FILE_TYPE_CONFIG: dict[str, dict] = {
         "replace_by_prefix":  True,
         "allowed_mime_types": MIME_PDF_ONLY,
     },
+    FILE_TYPE_DOC_SEGURO: {
+        "scope":              "contenedor",
+        "prop":               CONTENEDOR_PROP_DOCUMENTOS,
+        "filename_prefix":    CONTENEDOR_DOC_PREFIX_SEGURO,
+        "folder":             CONTENEDOR_DOCS_FOLDER,
+        "label":              "Seguro",
+        "replace_by_prefix":  True,
+        "allowed_mime_types": MIME_PDF_ONLY,
+    },
     FILE_TYPE_DOC_WAIVER_BORRADOR: {
         "scope":              "contenedor",
         "prop":               CONTENEDOR_PROP_DOCUMENTOS,
@@ -268,6 +297,15 @@ FILE_TYPE_CONFIG: dict[str, dict] = {
         "max_files":          MAX_FILES_PER_PROPERTY,
         "allowed_mime_types": MIME_FOTOS_CARGA,
     },
+    FILE_TYPE_ALBARAN_MENSAJERIA: {
+        "scope":              "contenedor",
+        "prop":               CONTENEDOR_PROP_ALBARAN_MENSAJERIA,
+        "filename_prefix":    ALBARAN_MENSAJERIA_PREFIX,
+        "folder":             CONTENEDOR_DOCS_FOLDER,
+        "label":              "albarán de recogida",
+        "replace_by_prefix":  True,
+        "allowed_mime_types": MIME_OTROS_DOCUMENTOS,
+    },
 }
 
 DOC_TIPO_TO_PREFIX = {
@@ -276,6 +314,7 @@ DOC_TIPO_TO_PREFIX = {
     "eur1":            CONTENEDOR_DOC_PREFIX_EUR1,
     "anexo_i":         CONTENEDOR_DOC_PREFIX_ANEXO_I,
     "inspeccion":      CONTENEDOR_DOC_PREFIX_INSPECCION,
+    "seguro":          CONTENEDOR_DOC_PREFIX_SEGURO,
     "waiver_borrador": CONTENEDOR_DOC_PREFIX_WAIVER_BORRADOR,
     "waiver_final":    CONTENEDOR_DOC_PREFIX_WAIVER_FINAL,
 }
@@ -286,6 +325,10 @@ DEAL_PROP_DESCRIPCION_MERCANCIA  = "certificado_origen_mercancia"
 DEAL_PROP_OBSERVACIONES          = "observaciones"
 DEAL_PROP_FOTOS_DE_CARGA         = "fotos_de_carga"
 
+DEAL_PROP_RESPONSABLE_COMERCIAL      = "responsable_comercial"
+DEAL_PROP_RESPONSABLE_ADMINISTRACION = "responsable_administracion"
+DEAL_PROP_RESPONSABLE_LOGISTICA      = "responsable_logistica"
+
 # Estas propiedades viven en el Deal de cotización (NO en el pipeline de pedidos)
 COTIZACION_PROP_CONSIGNEE             = "consignee"
 COTIZACION_PROP_NOTIFY                = "notify"
@@ -295,19 +338,27 @@ COTIZACION_PROP_ALMACEN               = "almacen"
 COTIZACION_PROP_LUGAR_CARGA           = "lugar_carga"
 COTIZACION_PROP_LOCALIDAD_DESTINO     = "localidad_destino"
 COTIZACION_PROP_COMENTARIOS_LOGISTICA = "comentarios_logistica"
+COTIZACION_PROP_TIPO_DE_VENTA         = "tipo_de_venta"
 COTIZACION_ALMACEN_PROEX_SAN_ROQUE    = "01"
 
 COMPANY_PROP_NAME          = "name"
 COMPANY_PROP_TIPO_CLIENTE  = "tipo_cliente"
 
-# Flujo derivado de Company.tipo_cliente + Cotización.almacen
-TIPO_FLUJO_EXPORTACION         = "exportacion"
-TIPO_FLUJO_NACIONAL            = "nacional"
-TIPO_FLUJO_NACIONAL_SAN_ROQUE  = "nacional_san_roque"
+# Flujo derivado del transporte (tipo_contenedor) y el origen (Cotización.almacen).
+# El tipo de cliente ya no decide la apariencia.
+TIPO_FLUJO_CONTENEDOR             = "contenedor"
+TIPO_FLUJO_CONTENEDOR_SAN_ROQUE  = "contenedor_san_roque"
+TIPO_FLUJO_CAMION                = "camion"
+TIPO_FLUJO_CAMION_SAN_ROQUE      = "camion_san_roque"
+
+# Camión = valores de esta allowlist (normalizados); el resto, contenedor.
+# CAMION16P a confirmar con cliente (de momento contenedor).
+CAMION_TIPO_CONTENEDOR = frozenset({"TRAILER80"})
 
 DEAL_DETALLE_PROPERTIES = [
     DEAL_PROP_NUMERO_DE_PEDIDO,
     DEAL_PROP_PIPELINE,
+    "dealstage",
     "dealname",
     DEAL_PROP_ETD,
     DEAL_PROP_ETA,
@@ -319,11 +370,14 @@ DEAL_DETALLE_PROPERTIES = [
     DEAL_PROP_BL_ENVIADO_CLIENTE,
     DEAL_PROP_TIPO_DE_BL,
     DEAL_PROP_BORRADOR_BL,
+    DEAL_PROP_NUMERO_DE_BOOKING,
+    DEAL_PROP_CAMBIOS_EN_BL,
     DEAL_PROP_FACTURA_DEL_PEDIDO,
     DEAL_PROP_PACKING_LIST_PROEX,
     DEAL_PROP_CARTA_DE_PORTE_PROEX,
     DEAL_PROP_FECHA_FACTURACION_PEDIDO,
     DEAL_PROP_FECHA_VENCIMIENTO_FACTURA,
+    DEAL_PROP_NUMERO_DE_FACTURA,
     COTIZACION_PROP_CONSIGNEE,
     COTIZACION_PROP_NOTIFY,
     COTIZACION_PROP_PUERTO_DESTINO,
@@ -332,9 +386,12 @@ DEAL_DETALLE_PROPERTIES = [
     COTIZACION_PROP_LUGAR_CARGA,
     COTIZACION_PROP_LOCALIDAD_DESTINO,
     COTIZACION_PROP_COMENTARIOS_LOGISTICA,
+    COTIZACION_PROP_TIPO_DE_VENTA,
     DEAL_PROP_FECHA_DE_ENTREGA,
     DEAL_PROP_DIRECCION_DE_ENTREGA,
     DEAL_PROP_DATOS_DEL_CHOFER,
+    DEAL_PROP_TRANSITARIO_DEL_PEDIDO,
+    DEAL_PROP_TRANSITARIO_TERRESTRE_DEL_PEDIDO,
     "carga_por_palets",
     "preprints_language",
 ]
@@ -358,6 +415,8 @@ CONTENEDOR_DETALLE_PROPERTIES = [
     CONTENEDOR_PROP_CERT_SANITARIO,
     CONTENEDOR_PROP_CERT_ORIGEN_VALIDADO,
     CONTENEDOR_PROP_CERT_SANITARIO_VALIDADO,
+    CONTENEDOR_PROP_CERT_ORIGEN_ENVIAR_FIRMAR,
+    CONTENEDOR_PROP_CERT_SANITARIO_ENVIAR_FIRMAR,
     CONTENEDOR_PROP_DOCUMENTOS,
     CONTENEDOR_PROP_OTROS_DOCUMENTOS,
     CONTENEDOR_PROP_FOTOS_DE_CARGA,
@@ -368,6 +427,8 @@ CONTENEDOR_DETALLE_PROPERTIES = [
     CONTENEDOR_PROP_MERCANCIA_RETIRADA,
     CONTENEDOR_PROP_FECHA_LLEGADA_CONTENEDOR,
     CONTENEDOR_PROP_FECHA_RETIRADA_MERCANCIA,
+    CONTENEDOR_PROP_DATOS_ENVIO_MENSAJERIA,
+    CONTENEDOR_PROP_ALBARAN_MENSAJERIA,
 ]
 
 # USER_DEFINED, label "elementos" (Contenedor → Elemento)
@@ -454,9 +515,6 @@ ELEMENTO_PROPERTIES = [
     "tipo_articulo",
     "formato",
     "marca",
-    "descripcion_mercancia_es",
-    "descripcion_mercancia_en",
-    "descripcion_mercancia_fr",
 ]
 
 ELEMENTO_TIPO_FABRICANTE = "fabricante"
@@ -504,6 +562,14 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     },
 }
 
+# idioma del certificado (ES/EN/FR, en mayúsculas como las claves de TRANSLATIONS)
+# → columna de nombre traducido en Elementos y en la HubDB formato_producto.
+LANG_TO_NOMBRE_COLUMN: dict[str, str] = {
+    "ES": "nombre_es",
+    "EN": "nombre_en",
+    "FR": "nombre_fr",
+}
+
 ROLLBACK_VALID_DOC_TYPES: set = {"origen_borrador", "origen", "sanitario"}
 
 # "origen" en la API equivale a "origen_final" internamente
@@ -511,4 +577,91 @@ ROLLBACK_API_TO_INTERNAL_DOC_TYPE: dict = {
     "origen_borrador": DOC_TYPE_ORIGEN_BORRADOR,
     "origen":          DOC_TYPE_ORIGEN_FINAL,
     "sanitario":       DOC_TYPE_SANITARIO,
+}
+
+OBJECT_TYPE_COBRO = "2-44408688"
+ASSOC_CATEGORY_USER_DEFINED = "USER_DEFINED"
+
+# Negocio Documento: se crea (1:1) cuando un Negocio Pedido entra en la etapa
+# terminal "Preparar Documentación" del pipeline de pedidos. Vive en su propio
+# pipeline y arranca en "En proceso".
+PEDIDO_DEALSTAGE_PREPARAR_DOC = "1368383244"
+
+DOCUMENTO_PIPELINE_ID = "905179456"
+
+DOC_DEALSTAGE_EN_PROCESO     = "1371580054"
+DOC_DEALSTAGE_PTE_CONFIRMAR  = "1371580055"
+DOC_DEALSTAGE_CONFIRMADO     = "1371580056"
+DOC_DEALSTAGE_ENVIADA        = "1371580059"
+DOC_DEALSTAGE_RETIRADO       = "1380233754"
+DOC_DEALSTAGE_CIERRE_PERDIDO = "1371580060"
+
+# Cadena auto-calculada de menor a mayor. "En proceso" es el suelo; "Retirado"
+# es la etapa ganada (mercancía retirada por el cliente). "Cierre perdido" queda
+# fuera (solo manual, intocable por el calculador).
+DOC_DEALSTAGE_CADENA = [
+    DOC_DEALSTAGE_EN_PROCESO,
+    DOC_DEALSTAGE_PTE_CONFIRMAR,
+    DOC_DEALSTAGE_CONFIRMADO,
+    DOC_DEALSTAGE_ENVIADA,
+    DOC_DEALSTAGE_RETIRADO,
+]
+
+DOC_DEALSTAGE_LABELS = {
+    DOC_DEALSTAGE_EN_PROCESO:     "En proceso",
+    DOC_DEALSTAGE_PTE_CONFIRMAR:  "Pte. confirmar",
+    DOC_DEALSTAGE_CONFIRMADO:     "Confirmado",
+    DOC_DEALSTAGE_ENVIADA:        "Enviada",
+    DOC_DEALSTAGE_RETIRADO:       "Retirado",
+    DOC_DEALSTAGE_CIERRE_PERDIDO: "Cierre perdido",
+}
+
+# TypeIds dedicados del Negocio Documento (USER_DEFINED, direccionales). Cada uno
+# se crea desde el lado en que se definió en HubSpot:
+#   682 documento → contenedor (definida desde Documento)
+#   681 pedido → documento     (definida desde Pedido; se crea desde el pedido)
+#   684 cotización → documento (definida desde Cotización; se crea desde la cotización)
+ASSOC_TYPE_ID_DOCUMENTO_TO_CONTENEDOR = 682
+ASSOC_TYPE_ID_PEDIDO_TO_DOCUMENTO     = 681
+ASSOC_TYPE_ID_COTIZACION_TO_DOCUMENTO = 684
+
+# Cabecera del pedido-deal que se copia al documento-deal al crearlo. No se
+# copian archivos ni flags vivos: el calculador los lee en caliente.
+PEDIDO_PROPS_A_REPLICAR_EN_DOCUMENTO = [
+    DEAL_PROP_NUMERO_DE_PEDIDO,
+    DEAL_PROP_ETD,
+    DEAL_PROP_ETA,
+    DEAL_PROP_TIPO_DE_BL,
+    DEAL_PROP_NUMERO_DE_BOOKING,
+    DEAL_PROP_CAMBIOS_EN_BL,
+    DEAL_PROP_DESCRIPCION_MERCANCIA,
+    DEAL_PROP_OBSERVACIONES,
+    COTIZACION_PROP_CONSIGNEE,
+    COTIZACION_PROP_NOTIFY,
+    COTIZACION_PROP_PUERTO_SALIDA,
+    COTIZACION_PROP_PUERTO_DESTINO,
+    "preprints_language",
+    DEAL_PROP_RESPONSABLE_COMERCIAL,
+    DEAL_PROP_RESPONSABLE_ADMINISTRACION,
+    DEAL_PROP_RESPONSABLE_LOGISTICA,
+]
+
+# Valores del multi-select documentos_a_generar que marcan obligatoriedad. La
+# lista es autoritativa: un documento solo gatea la etapa si está aquí.
+DOC_GENERAR_VALUE_BL        = "bl"
+DOC_GENERAR_VALUE_ORIGEN    = DOC_TYPE_TO_HUBSPOT_FILTER[DOC_TYPE_ORIGEN_BORRADOR]
+DOC_GENERAR_VALUE_SANITARIO = DOC_TYPE_TO_HUBSPOT_FILTER[DOC_TYPE_SANITARIO]
+DOC_GENERAR_VALUE_OTROS     = "otros"
+
+# Otros documentos obligatorios: valor de documentos_a_generar → prefijos de
+# nombre que cuentan como "subido" dentro de la prop `documentos`. "otros" vive
+# en su propia prop (otros_documentos) y se trata aparte.
+DOC_GENERAR_OTROS_TO_PREFIXES = {
+    "dua":        (CONTENEDOR_DOC_PREFIX_DUA,),
+    "arc":        (CONTENEDOR_DOC_PREFIX_ARC,),
+    "eur1":       (CONTENEDOR_DOC_PREFIX_EUR1,),
+    "anexo_i":    (CONTENEDOR_DOC_PREFIX_ANEXO_I,),
+    "inspeccion": (CONTENEDOR_DOC_PREFIX_INSPECCION,),
+    "seguro":     (CONTENEDOR_DOC_PREFIX_SEGURO,),
+    "waiver":     (CONTENEDOR_DOC_PREFIX_WAIVER_BORRADOR, CONTENEDOR_DOC_PREFIX_WAIVER_FINAL),
 }

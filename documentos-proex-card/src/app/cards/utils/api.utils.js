@@ -17,7 +17,10 @@ export const fetchFromAPI = async (endpoint, options = {}) => {
       method: options.method || "GET",
       timeout: API_CONFIG.timeout,
       body: options.body,
-      headers: options.headers,
+      headers: {
+        ...options.headers,
+        Authorization: `Bearer ${API_CONFIG.cardSecret}`,
+      },
     });
 
     if (!response.ok) {

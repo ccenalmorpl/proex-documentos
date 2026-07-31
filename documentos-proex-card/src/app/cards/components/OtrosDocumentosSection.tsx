@@ -9,17 +9,25 @@ import {
   Link,
   Divider,
   LoadingSpinner,
+  Table,
+  TableHead,
+  TableBody,
+  TableRow,
+  TableHeader,
+  TableCell,
 } from "@hubspot/ui-extensions";
 
 import { SeccionBloque, type EstadoEtapa } from "./ui/SeccionBloque";
 import type {
   ArchivoSimple,
+  DealFile,
   EstadoOtrosDocs,
   OtroDocArchivo,
   OtroDocTipoDiscriminado,
+  PedidoDetalleContenedor,
   PedidoDetalleInfo,
 } from "../utils/documentos.utils";
-import { formatDateES } from "../utils/documentos.utils";
+import { docsCabeceraDeContenedor, formatDateES } from "../utils/documentos.utils";
 import {
   buildUploadModalUri,
   deletePedidoFile,
@@ -51,7 +59,22 @@ interface OtrosDocumentosSectionProps {
   estado: EstadoOtrosDocs;
   actions: any;
   onUpdated: () => void | Promise<void>;
+  /** Tipos gestionados en otra etapa (p. ej. embarque export) que no se renderizan aquí. */
+  tiposExcluidos?: string[];
+  /** Subconjunto del embarque; si tiene >1, las subidas se replican a todos. */
+  contenedorIdsDestino?: string[];
+  /** Contenedores seleccionados: la tabla "Documentos del pedido" pone una fila por cada uno. */
+  contenedoresSeleccionados: PedidoDetalleContenedor[];
+  /** Aún no se ha aprobado el envío de documentación al cliente. */
+  envioNoPermitido?: boolean;
 }
+
+const CeldaDocCabecera: React.FC<{ archivo: DealFile | null }> = ({ archivo }) =>
+  archivo?.url ? (
+    <Link href={{ url: archivo.url, external: true }}>Ver documento</Link>
+  ) : (
+    <Tag variant="warning">Pendiente</Tag>
+  );
 
 const FileRow: React.FC<{
   label: string;
@@ -98,6 +121,9 @@ const FileRow: React.FC<{
         </>
       )}
     </Flex>
+    {archivo?.created_at && (
+      <Text variant="microcopy">Subido el {formatDateES(archivo.created_at)}</Text>
+    )}
   </Flex>
 );
 
@@ -122,20 +148,25 @@ const MultiFileSlot: React.FC<{
       {archivos.length > 0 && (
         <Flex direction="column" gap="extra-small">
           {archivos.map((a) => (
-            <Flex key={a.file_id} direction="row" gap="sm" align="center">
-              <StatusTag variant="success">
-                {a.url ? (
-                  <Link href={{ url: a.url, external: true }}>{a.name}</Link>
+            <Flex key={a.file_id} direction="column" gap="extra-small">
+              <Flex direction="row" gap="sm" align="center">
+                <StatusTag variant="success">
+                  {a.url ? (
+                    <Link href={{ url: a.url, external: true }}>{a.name}</Link>
+                  ) : (
+                    a.name
+                  )}
+                </StatusTag>
+                {deletingFileIds.has(a.file_id) ? (
+                  <LoadingSpinner size="sm" label="Quitando..." />
                 ) : (
-                  a.name
+                  <Button variant="secondary" size="xs" onClick={() => onBorrar(a.file_id)}>
+                    Quitar
+                  </Button>
                 )}
-              </StatusTag>
-              {deletingFileIds.has(a.file_id) ? (
-                <LoadingSpinner size="sm" label="Quitando..." />
-              ) : (
-                <Button variant="secondary" size="xs" onClick={() => onBorrar(a.file_id)}>
-                  Quitar
-                </Button>
+              </Flex>
+              {a.created_at && (
+                <Text variant="microcopy">Subido el {formatDateES(a.created_at)}</Text>
               )}
             </Flex>
           ))}
@@ -159,21 +190,6 @@ const MultiFileSlot: React.FC<{
   );
 };
 
-const ReadonlyDocLink: React.FC<{
-  label: string;
-  url: string | null;
-  fallbackWarning: string;
-}> = ({ label, url, fallbackWarning }) => (
-  <Flex direction="column" gap="extra-small" align="start">
-    <Text format={{ fontWeight: "demibold" }}>{label}</Text>
-    {url ? (
-      <Link href={{ url, external: true }}>Ver documento</Link>
-    ) : (
-      <Tag variant="warning">{fallbackWarning}</Tag>
-    )}
-  </Flex>
-);
-
 const OtrosDocumentosSection: React.FC<OtrosDocumentosSectionProps> = ({
   identificador = "3",
   titulo = "Otros documentos",
@@ -187,18 +203,29 @@ const OtrosDocumentosSection: React.FC<OtrosDocumentosSectionProps> = ({
   estado,
   actions,
   onUpdated,
+  tiposExcluidos,
+  contenedorIdsDestino,
+  contenedoresSeleccionados,
+  envioNoPermitido,
 }) => {
   const [deletingFileIds, setDeletingFileIds] = useState<Set<string>>(new Set());
   const [uploadingKeys,   setUploadingKeys]   = useState<Set<string>>(new Set());
   const [waiverValidadoOptim, setWaiverValidadoOptim] = useState(estado.waiverValidado);
 
+  const destinosEmbarque =
+    contenedorIdsDestino && contenedorIdsDestino.length > 1
+      ? contenedorIdsDestino
+      : undefined;
+
   useEffect(() => {
     setWaiverValidadoOptim(estado.waiverValidado);
   }, [estado.waiverValidado]);
 
+  const excluidos = new Set(tiposExcluidos ?? []);
   const subibles = documentosAGenerar.filter(
     (k) =>
       !OTROS_DOC_GESTIONADOS_EN_OTRAS_ETAPAS.has(k) &&
+      !excluidos.has(k) &&
       OTROS_DOC_SUBIBLES_VALIDOS.has(k),
   );
 
@@ -252,7 +279,13 @@ const OtrosDocumentosSection: React.FC<OtrosDocumentosSectionProps> = ({
     });
     actions.openIframeModal(
       {
-        uri: buildUploadModalUri(numeroPedido, companyId, tipoDocumento, contenedorId),
+        uri: buildUploadModalUri(
+          numeroPedido,
+          companyId,
+          tipoDocumento,
+          contenedorId,
+          destinosEmbarque,
+        ),
         title: titulo,
         width: 720,
         height: 560,
@@ -317,7 +350,9 @@ const OtrosDocumentosSection: React.FC<OtrosDocumentosSectionProps> = ({
       return next;
     });
     try {
-      await deletePedidoFile(numeroPedido, companyId, fileId, fileType, contenedorId);
+      await deletePedidoFile(
+        numeroPedido, companyId, fileId, fileType, contenedorId, destinosEmbarque,
+      );
       await onUpdated();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -343,48 +378,48 @@ const OtrosDocumentosSection: React.FC<OtrosDocumentosSectionProps> = ({
       titulo={titulo}
       estado={seccionEstado}
       defaultAbierta={seccionEstado !== "pasada"}
+      envioNoPermitido={envioNoPermitido}
       badge={badge}
     >
       <Flex direction="column" gap="medium">
         <Flex direction="column" gap="small">
           <Text format={{ fontWeight: "demibold" }}>Documentos del pedido</Text>
           <Text variant="microcopy">
-            Documentos generados en el pipeline del pedido (compartidos por todos los contenedores).
+            Factura, packing list y carta de porte se generan por contenedor en el pipeline
+            del pedido. Si un contenedor aún no tiene el suyo, se muestra el documento
+            compartido del pedido.
           </Text>
-          <Flex direction="row" gap="large" align="start">
-            <Flex direction="column" gap="extra-small" align="start">
-              <ReadonlyDocLink
-                label="Factura"
-                url={pedidoInfo.factura_pedido?.url ?? null}
-                fallbackWarning="Generar en pedido"
-              />
-              {pedidoInfo.fecha_de_facturacion_pedido && (
-                <Text variant="microcopy">
-                  Facturado: {formatDateES(pedidoInfo.fecha_de_facturacion_pedido)}
-                </Text>
-              )}
-              {pedidoInfo.fecha_de_vencimiento_factura && (
-                <Text variant="microcopy">
-                  Vencimiento: {formatDateES(pedidoInfo.fecha_de_vencimiento_factura)}
-                </Text>
-              )}
-            </Flex>
-            <ReadonlyDocLink
-              label="Packing list"
-              url={pedidoInfo.packing_list_pedido?.url ?? null}
-              fallbackWarning="Generar en pedido"
-            />
-            {pedidoInfo.carta_porte_pedido?.url && (
-              <Flex direction="column" gap="extra-small" align="start">
-                <Text format={{ fontWeight: "demibold" }}>Carta de porte</Text>
-                <Link
-                  href={{ url: pedidoInfo.carta_porte_pedido.url, external: true }}
-                >
-                  Ver documento
-                </Link>
-              </Flex>
-            )}
-          </Flex>
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableHeader width={150}>Contenedor</TableHeader>
+                <TableHeader>Factura</TableHeader>
+                <TableHeader>Packing list</TableHeader>
+                <TableHeader>Carta de porte</TableHeader>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {contenedoresSeleccionados.map((c) => {
+                const cab = docsCabeceraDeContenedor(c);
+                const vto = c.fecha_de_vencimiento_factura ?? pedidoInfo.fecha_de_vencimiento_factura;
+                return (
+                  <TableRow key={c.id}>
+                    <TableCell>
+                      <Flex direction="column" gap="extra-small" align="start">
+                        <Text format={{ fontWeight: "demibold" }}>{c.nombre ?? c.id}</Text>
+                        {vto && (
+                          <Text variant="microcopy">Vto factura: {formatDateES(vto)}</Text>
+                        )}
+                      </Flex>
+                    </TableCell>
+                    <TableCell><CeldaDocCabecera archivo={cab.factura} /></TableCell>
+                    <TableCell><CeldaDocCabecera archivo={cab.packing} /></TableCell>
+                    <TableCell><CeldaDocCabecera archivo={cab.cartaPorte} /></TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
         </Flex>
 
         <Divider />
@@ -393,6 +428,12 @@ const OtrosDocumentosSection: React.FC<OtrosDocumentosSectionProps> = ({
           <Text format={{ fontWeight: "demibold" }}>
             Documentos a aportar{contenedorNombre ? ` — ${contenedorNombre}` : ""}
           </Text>
+          {destinosEmbarque && (
+            <Text variant="microcopy">
+              Cada archivo que subas se replica a los {destinosEmbarque.length}{" "}
+              contenedores seleccionados.
+            </Text>
+          )}
           {!hayAlgoSubible ? (
             <Text variant="microcopy">
               Este pedido no tiene documentos extra marcados en "documentación a generar".

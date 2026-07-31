@@ -16,6 +16,26 @@ class Settings(BaseSettings):
         description="Comma-separated list of allowed CORS origins"
     )
 
+    hubspot_webhook_secret: Optional[str] = Field(
+        default=None,
+        description=(
+            "Shared secret enviado por HubSpot Workflow en el header "
+            "X-Webhook-Token. Si está sin configurar, el endpoint webhook "
+            "responde 503."
+        ),
+    )
+
+    proex_card_secret: Optional[str] = Field(
+        default=None,
+        description=(
+            "Shared secret que la card manda en el header Authorization como "
+            "'Bearer <secreto>'. hubspot.fetch() descarta cualquier otro "
+            "header custom, por eso Authorization es el único vehículo "
+            "posible. Solo se exige si is_production=True; si falta, los "
+            "endpoints de negocio responden 503."
+        ),
+    )
+
     debug: bool = Field(default=False)
     app_name: str = Field(default="Documentos Proex Microservice")
     version: str = Field(default="1.0.0")

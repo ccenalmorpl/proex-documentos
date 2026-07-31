@@ -103,7 +103,6 @@ const ContenedoresTable: React.FC<ContenedoresTableProps> = ({
         <TableRow>
           {mode === "pending" && <TableHeader> </TableHeader>}
           <TableHeader>Contenedor</TableHeader>
-          <TableHeader>Cliente</TableHeader>
           <TableHeader>Negocio</TableHeader>
           <TableHeader>ETD</TableHeader>
           <TableHeader>ETA</TableHeader>
@@ -130,7 +129,6 @@ const ContenedoresTable: React.FC<ContenedoresTableProps> = ({
               </TableCell>
             )}
             <TableCell>{c.name}</TableCell>
-            <TableCell>{c.nombre_cliente ?? "—"}</TableCell>
             <TableCell>
               {c.deal_id ? (
                 <Link

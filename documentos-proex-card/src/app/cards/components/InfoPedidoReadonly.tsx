@@ -10,7 +10,7 @@ import {
 import { CrmDataHighlight } from "@hubspot/ui-extensions/crm";
 
 import { formatDateES, type PedidoInfo } from "../utils/documentos.utils";
-import { isFlujoNacional, type TipoPedido } from "../constants/documentos.constants";
+import { esAparienciaCamion, type TipoPedido } from "../constants/documentos.constants";
 import FlujoBadge from "./ui/FlujoBadge";
 import CargaPaletsBadge from "./ui/CargaPaletsBadge";
 
@@ -44,7 +44,7 @@ const InfoPedidoReadonly: React.FC<InfoPedidoReadonlyProps> = ({
   tipoPedido,
   cargaPorPalets,
 }) => {
-  const flujoNacional = isFlujoNacional(tipoPedido);
+  const esCamion = esAparienciaCamion(tipoPedido);
   const companyIdNum = Number(companyId);
 
   return (
@@ -66,9 +66,12 @@ const InfoPedidoReadonly: React.FC<InfoPedidoReadonlyProps> = ({
           />
         )}
 
-        {flujoNacional ? (
+        {esCamion ? (
           <>
             <DescriptionList direction="row">
+              <DescriptionListItem label="Tipo de venta">
+                {placeholder(info.tipo_de_venta)}
+              </DescriptionListItem>
               <DescriptionListItem label="Fecha de entrega">
                 {placeholder(formatDateES(info.fecha_de_entrega))}
               </DescriptionListItem>
@@ -102,19 +105,13 @@ const InfoPedidoReadonly: React.FC<InfoPedidoReadonlyProps> = ({
               <DescriptionListItem label="Comentarios de logística">
                 {placeholder(info.comentarios_logistica)}
               </DescriptionListItem>
-              <DescriptionListItem label="Descripción mercancía">
-                {placeholder(info.descripcion_mercancia)}
-              </DescriptionListItem>
             </DescriptionList>
           </>
         ) : (
           <>
             <DescriptionList direction="row">
-              <DescriptionListItem label="ETD (salida)">
-                {placeholder(formatDateES(info.etd))}
-              </DescriptionListItem>
-              <DescriptionListItem label="ETA (llegada)">
-                {placeholder(formatDateES(info.eta))}
+              <DescriptionListItem label="Tipo de venta">
+                {placeholder(info.tipo_de_venta)}
               </DescriptionListItem>
               <DescriptionListItem label="Nº contenedores">
                 {placeholder(info.numero_contenedores)}
@@ -133,9 +130,6 @@ const InfoPedidoReadonly: React.FC<InfoPedidoReadonlyProps> = ({
               </DescriptionListItem>
               <DescriptionListItem label="Notify">
                 {placeholder(info.notify)}
-              </DescriptionListItem>
-              <DescriptionListItem label="Descripción mercancía">
-                {placeholder(info.descripcion_mercancia)}
               </DescriptionListItem>
             </DescriptionList>
           </>

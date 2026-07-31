@@ -10,11 +10,12 @@ class HealthResponse(BaseModel):
 
 
 class FiltrosDocumentos(BaseModel):
-    empresa: Optional[str] = Field(None, description="Nombre o ID de la empresa (cliente)")
-    etd_desde: Optional[str] = Field(None, description="ETD contenedor - desde (YYYY-MM-DD)")
-    etd_hasta: Optional[str] = Field(None, description="ETD contenedor - hasta (YYYY-MM-DD)")
-    eta_desde: Optional[str] = Field(None, description="ETA contenedor - desde (YYYY-MM-DD)")
-    eta_hasta: Optional[str] = Field(None, description="ETA contenedor - hasta (YYYY-MM-DD)")
+    company_id: Optional[str] = Field(
+        None,
+        description="ID de la empresa (Company) del contexto de la card. Cuando viene, "
+                    "se filtra por esta empresa exacta y se ignora 'empresa'.",
+    )
+    empresa: Optional[str] = Field(None, description="Nombre o ID de la empresa (cliente). Legacy: búsqueda difusa por nombre.")
     tipos_documento: Optional[List[str]] = Field(
         None,
         description="Tipos de documento a filtrar: origen_borrador, origen_final, sanitario"
@@ -32,7 +33,6 @@ class DocInfo(BaseModel):
 class ContenedorListItem(BaseModel):
     id: str
     name: str
-    nombre_cliente: Optional[str] = None
     etd: Optional[str] = None
     eta: Optional[str] = None
     deal_id: Optional[str] = None
