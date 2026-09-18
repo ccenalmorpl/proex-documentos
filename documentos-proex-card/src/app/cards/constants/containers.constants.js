@@ -1,8 +1,6 @@
 export const CONTAINER_TYPES = {
-  CAMION_16P: "CAMION 16P",
   D20DR: "D20DR",
   D40DR: "D40DR",
-  PALETS: "PALETS",
   TRAILER_80: "TRAILER 80",
 };
 

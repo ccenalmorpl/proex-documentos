@@ -19,7 +19,7 @@ def test_trailer_es_camion(raw):
     assert service._es_camion(raw) is True
 
 
-@pytest.mark.parametrize("raw", ["D40DR", "D20DR", "CAMION16P", "", None])
+@pytest.mark.parametrize("raw", ["D40DR", "D20DR", "", None])
 def test_resto_es_contenedor(raw):
     assert service._es_camion(raw) is False
 

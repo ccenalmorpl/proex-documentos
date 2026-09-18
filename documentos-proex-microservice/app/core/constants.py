@@ -352,7 +352,7 @@ TIPO_FLUJO_CAMION                = "camion"
 TIPO_FLUJO_CAMION_SAN_ROQUE      = "camion_san_roque"
 
 # Camión = valores de esta allowlist (normalizados); el resto, contenedor.
-# CAMION16P a confirmar con cliente (de momento contenedor).
+# Tipos vivos: D20DR, D40DR y TRAILER80 (el único camión).
 CAMION_TIPO_CONTENEDOR = frozenset({"TRAILER80"})
 
 DEAL_DETALLE_PROPERTIES = [
