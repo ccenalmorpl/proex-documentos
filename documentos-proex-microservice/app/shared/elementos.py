@@ -1,5 +1,6 @@
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
 from hubspot.crm.objects import (
@@ -16,6 +17,8 @@ from app.core.constants import (
 
 logger = logging.getLogger(__name__)
 
+ASSOC_WORKERS = 8
+
 
 def get_elementos_fabricante_por_contenedor(
     client, container_ids: List[str]
@@ -30,15 +33,21 @@ def get_elementos_fabricante_por_contenedor(
         f"obteniendo elementos para {len(container_ids)} contenedores"
     )
 
-    elemento_ids_per_container: Dict[str, List[str]] = {}
-    for cid in container_ids:
+    def _elemento_ids(cid: str) -> List[str]:
         resp = client.crm.associations.v4.basic_api.get_page(
             object_type=OBJECT_TYPE_CONTENEDOR,
             object_id=cid,
             to_object_type=OBJECT_TYPE_ELEMENTO,
             limit=250,
         )
-        elemento_ids_per_container[cid] = [r.to_object_id for r in (resp.results or [])]
+        return [r.to_object_id for r in (resp.results or [])]
+
+    # Una llamada por contenedor: en serie, 20 contenedores eran 7 s y la card
+    # corta a los 15 s (P-65571985983).
+    with ThreadPoolExecutor(max_workers=ASSOC_WORKERS) as pool:
+        elemento_ids_per_container: Dict[str, List[str]] = dict(
+            zip(container_ids, pool.map(_elemento_ids, container_ids))
+        )
 
     total_assoc = sum(len(v) for v in elemento_ids_per_container.values())
     logger.info(f"asociaciones encontradas: {total_assoc}")

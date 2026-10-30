@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -136,6 +137,8 @@ from app.shared.elementos import (
 )
 
 logger = logging.getLogger(__name__)
+
+FILE_METADATA_WORKERS = 8
 
 
 class PedidoNoEncontradoError(Exception):
@@ -390,19 +393,29 @@ async def list_pedidos_for_company(company_id: str) -> PedidosListaResponse:
 
 
 def _search_pedidos_by_numero(client, numero: str, pipeline_id: str) -> List[str]:
+    # Un expediente tiene un deal por contenedor y los hay de 20 o más: sin
+    # paginar, la card solo veía los 10 primeros (P-65571985983, 28/10/2026).
     filters = [
         DealFilter(property_name=DEAL_PROP_NUMERO_DE_PEDIDO, operator="EQ", value=numero),
         DealFilter(property_name=DEAL_PROP_PIPELINE, operator="EQ", value=pipeline_id),
     ]
-    search_request = DealSearchRequest(
-        filter_groups=[DealFilterGroup(filters=filters)],
-        properties=[DEAL_PROP_NUMERO_DE_PEDIDO, DEAL_PROP_PIPELINE],
-        limit=10,
-    )
-    resp = client.crm.deals.search_api.do_search(
-        public_object_search_request=search_request,
-    )
-    return [d.id for d in (resp.results or [])]
+    deal_ids: List[str] = []
+    after: Optional[str] = None
+    while True:
+        search_request = DealSearchRequest(
+            filter_groups=[DealFilterGroup(filters=filters)],
+            properties=[DEAL_PROP_NUMERO_DE_PEDIDO, DEAL_PROP_PIPELINE],
+            limit=100,
+            after=after,
+        )
+        resp = client.crm.deals.search_api.do_search(
+            public_object_search_request=search_request,
+        )
+        deal_ids.extend(d.id for d in (resp.results or []))
+        if resp.paging and resp.paging.next:
+            after = resp.paging.next.after
+        else:
+            return deal_ids
 
 
 def _verify_pedido_belongs_to_company(
@@ -618,6 +631,7 @@ def _build_contenedor_item(
     bl_archivos: Optional[List[BLArchivo]] = None,
     tiene_negocio_documento: bool = False,
     documento_dealstage: Optional[str] = None,
+    meta_cache: Optional[dict] = None,
 ) -> ContenedorDetalleItem:
     peso_bruto = props.get("peso_bruto")
     tara = props.get("tara")
@@ -647,9 +661,9 @@ def _build_contenedor_item(
         documentos_a_generar=_parse_documentos_a_generar(props.get("documentos_a_generar")),
         importe_pendiente_cobro=props.get("importe_pendiente_cobro"),
         price=props.get("price"),
-        documentos_archivos=_build_documentos_archivos(props.get(CONTENEDOR_PROP_DOCUMENTOS)),
-        otros_documentos=_build_archivos_simples(props.get(CONTENEDOR_PROP_OTROS_DOCUMENTOS)),
-        fotos_de_carga_archivos=_build_archivos_simples(props.get(CONTENEDOR_PROP_FOTOS_DE_CARGA)),
+        documentos_archivos=_build_documentos_archivos(props.get(CONTENEDOR_PROP_DOCUMENTOS), meta_cache),
+        otros_documentos=_build_archivos_simples(props.get(CONTENEDOR_PROP_OTROS_DOCUMENTOS), meta_cache),
+        fotos_de_carga_archivos=_build_archivos_simples(props.get(CONTENEDOR_PROP_FOTOS_DE_CARGA), meta_cache),
         enviar_por_mensajeria=_parse_bool(props.get(CONTENEDOR_PROP_ENVIAR_POR_MENSAJERIA)),
         permitir_enviar_documentacion=_parse_bool(props.get(CONTENEDOR_PROP_PERMITIR_ENVIAR_DOCUMENTACION)),
         documentacion_recibida=_parse_bool(props.get(CONTENEDOR_PROP_DOCUMENTACION_RECIBIDA)),
@@ -659,7 +673,7 @@ def _build_contenedor_item(
         fecha_retirada_mercancia=_iso_from_hubspot_date(fecha_retirada),
         datos_envio_mensajeria=(props.get(CONTENEDOR_PROP_DATOS_ENVIO_MENSAJERIA) or None),
         albaran_mensajeria=next(
-            iter(_build_archivos_simples(props.get(CONTENEDOR_PROP_ALBARAN_MENSAJERIA))), None
+            iter(_build_archivos_simples(props.get(CONTENEDOR_PROP_ALBARAN_MENSAJERIA), meta_cache)), None
         ),
         numero_de_factura=(numero_de_factura or None),
         fecha_de_vencimiento_factura=(fecha_de_vencimiento_factura or None),
@@ -686,10 +700,27 @@ def _classify_bl_file_by_name(name: str) -> str:
     return "desconocido"
 
 
-def _build_bl_archivos(borrador_bl_raw: Optional[str]) -> List[BLArchivo]:
+def _file_metadata(file_id: str, meta_cache: Optional[dict]):
+    if meta_cache is not None and file_id in meta_cache:
+        return meta_cache[file_id]
+    meta = fetch_file_metadata(file_id)
+    if meta_cache is not None:
+        meta_cache[file_id] = meta
+    return meta
+
+
+def _prefetch_file_metadata(file_ids: List[str], meta_cache: dict) -> None:
+    pendientes = [fid for fid in dict.fromkeys(file_ids) if fid not in meta_cache]
+    if not pendientes:
+        return
+    with ThreadPoolExecutor(max_workers=FILE_METADATA_WORKERS) as pool:
+        meta_cache.update(zip(pendientes, pool.map(fetch_file_metadata, pendientes)))
+
+
+def _build_bl_archivos(borrador_bl_raw: Optional[str], meta_cache: Optional[dict] = None) -> List[BLArchivo]:
     archivos: List[BLArchivo] = []
     for file_id in parse_file_ids(borrador_bl_raw):
-        meta = fetch_file_metadata(file_id)
+        meta = _file_metadata(file_id, meta_cache)
         if meta is None:
             archivos.append(BLArchivo(file_id=file_id, name="", url=None, tipo="desconocido"))
             continue
@@ -713,10 +744,12 @@ def _classify_cert_file_by_name(name: str, family: str) -> str:
     return "desconocido"
 
 
-def _build_cert_archivos(raw: Optional[str], family: str) -> List[CertificadoArchivo]:
+def _build_cert_archivos(
+    raw: Optional[str], family: str, meta_cache: Optional[dict] = None,
+) -> List[CertificadoArchivo]:
     archivos: List[CertificadoArchivo] = []
     for file_id in parse_file_ids(raw):
-        meta = fetch_file_metadata(file_id)
+        meta = _file_metadata(file_id, meta_cache)
         if meta is None:
             archivos.append(CertificadoArchivo(file_id=file_id, name="", url=None, tipo="desconocido"))
             continue
@@ -730,15 +763,21 @@ def _build_cert_archivos(raw: Optional[str], family: str) -> List[CertificadoArc
     return archivos
 
 
-def _build_origen_archivos(cert_origen_borrador_raw: Optional[str], cert_origen_raw: Optional[str]) -> List[CertificadoArchivo]:
+def _build_origen_archivos(
+    cert_origen_borrador_raw: Optional[str],
+    cert_origen_raw: Optional[str],
+    meta_cache: Optional[dict] = None,
+) -> List[CertificadoArchivo]:
     return [
-        *_build_cert_archivos(cert_origen_borrador_raw, "origen"),
-        *_build_cert_archivos(cert_origen_raw, "origen"),
+        *_build_cert_archivos(cert_origen_borrador_raw, "origen", meta_cache),
+        *_build_cert_archivos(cert_origen_raw, "origen", meta_cache),
     ]
 
 
-def _build_sanitario_archivos(cert_sanitario_raw: Optional[str]) -> List[CertificadoArchivo]:
-    return _build_cert_archivos(cert_sanitario_raw, "sanitario")
+def _build_sanitario_archivos(
+    cert_sanitario_raw: Optional[str], meta_cache: Optional[dict] = None,
+) -> List[CertificadoArchivo]:
+    return _build_cert_archivos(cert_sanitario_raw, "sanitario", meta_cache)
 
 
 def _classify_documentos_file_by_name(name: str) -> str:
@@ -748,10 +787,10 @@ def _classify_documentos_file_by_name(name: str) -> str:
     return "desconocido"
 
 
-def _build_documentos_archivos(raw: Optional[str]) -> List[OtroDocArchivo]:
+def _build_documentos_archivos(raw: Optional[str], meta_cache: Optional[dict] = None) -> List[OtroDocArchivo]:
     archivos: List[OtroDocArchivo] = []
     for file_id in parse_file_ids(raw):
-        meta = fetch_file_metadata(file_id)
+        meta = _file_metadata(file_id, meta_cache)
         if meta is None:
             archivos.append(OtroDocArchivo(file_id=file_id, name="", url=None, tipo="desconocido"))
             continue
@@ -765,10 +804,10 @@ def _build_documentos_archivos(raw: Optional[str]) -> List[OtroDocArchivo]:
     return archivos
 
 
-def _build_archivos_simples(raw: Optional[str]) -> List[ArchivoSimple]:
+def _build_archivos_simples(raw: Optional[str], meta_cache: Optional[dict] = None) -> List[ArchivoSimple]:
     archivos: List[ArchivoSimple] = []
     for file_id in parse_file_ids(raw):
-        meta = fetch_file_metadata(file_id)
+        meta = _file_metadata(file_id, meta_cache)
         if meta is None:
             archivos.append(ArchivoSimple(file_id=file_id, name="", url=None))
             continue
@@ -786,14 +825,7 @@ def _build_deal_file(raw: Optional[str], meta_cache: Optional[dict] = None) -> O
     if not ids:
         return None
     file_id = ids[0]
-    # Caché por request: el mismo file_id (factura/packing/carta) se repite entre
-    # los N pedido-deals/contenedores; se resuelve la metadata una sola vez.
-    if meta_cache is not None and file_id in meta_cache:
-        meta = meta_cache[file_id]
-    else:
-        meta = fetch_file_metadata(file_id)
-        if meta_cache is not None:
-            meta_cache[file_id] = meta
+    meta = _file_metadata(file_id, meta_cache)
     if meta is None:
         return DealFile(file_id=file_id, name=None, url=None)
     return DealFile(file_id=meta.file_id, name=meta.name, url=meta.url)
@@ -867,19 +899,56 @@ def _build_pedido_info(
         bl_enviado_cliente=_parse_bool(pedido_props.get(DEAL_PROP_BL_ENVIADO_CLIENTE)),
         tipo_de_bl=(pedido_props.get(DEAL_PROP_TIPO_DE_BL) or None),
         numero_de_booking=(pedido_props.get(DEAL_PROP_NUMERO_DE_BOOKING) or None),
-        bl_archivos=_build_bl_archivos(pedido_props.get(DEAL_PROP_BORRADOR_BL)),
+        bl_archivos=_build_bl_archivos(pedido_props.get(DEAL_PROP_BORRADOR_BL), meta_cache),
         certificado_origen_validado=_parse_bool(contenedor_sample_props.get(CONTENEDOR_PROP_CERT_ORIGEN_VALIDADO)),
         certificado_sanitario_validado=_parse_bool(contenedor_sample_props.get(CONTENEDOR_PROP_CERT_SANITARIO_VALIDADO)),
         certificado_origen_enviar_a_firmar=_parse_bool(contenedor_sample_props.get(CONTENEDOR_PROP_CERT_ORIGEN_ENVIAR_FIRMAR)),
         certificado_sanitario_enviar_a_firmar=_parse_bool(contenedor_sample_props.get(CONTENEDOR_PROP_CERT_SANITARIO_ENVIAR_FIRMAR)),
-        origen_archivos=_build_origen_archivos(cert_origen_borrador_raw, cert_origen_raw),
-        sanitario_archivos=_build_sanitario_archivos(cert_sanitario_raw),
+        origen_archivos=_build_origen_archivos(cert_origen_borrador_raw, cert_origen_raw, meta_cache),
+        sanitario_archivos=_build_sanitario_archivos(cert_sanitario_raw, meta_cache),
         factura_pedido=_build_deal_file(pedido_props.get(DEAL_PROP_FACTURA_DEL_PEDIDO), meta_cache),
         packing_list_pedido=_build_deal_file(pedido_props.get(DEAL_PROP_PACKING_LIST_PROEX), meta_cache),
         carta_porte_pedido=_build_deal_file(pedido_props.get(DEAL_PROP_CARTA_DE_PORTE_PROEX), meta_cache),
         fecha_de_facturacion_pedido=(pedido_props.get(DEAL_PROP_FECHA_FACTURACION_PEDIDO) or None),
         fecha_de_vencimiento_factura=(pedido_props.get(DEAL_PROP_FECHA_VENCIMIENTO_FACTURA) or None),
     )
+
+
+def _detalle_file_ids(
+    pedido_props: dict,
+    cert_props: dict,
+    contenedores_props: Dict[str, dict],
+    filas: List[Tuple[str, dict, Optional[Tuple[str, dict]]]],
+) -> List[str]:
+    """Los ficheros que pinta el detalle. Si alguno se queda fuera no pasa nada:
+    se pide en serie al construir la fila."""
+    file_ids: List[str] = []
+    for prop in (
+        CONTENEDOR_PROP_CERT_ORIGEN_BORRADOR,
+        CONTENEDOR_PROP_CERT_ORIGEN,
+        CONTENEDOR_PROP_CERT_SANITARIO,
+    ):
+        file_ids += parse_file_ids(cert_props.get(prop))
+    file_ids += parse_file_ids(pedido_props.get(DEAL_PROP_BORRADOR_BL))
+    for deal_props in [pedido_props, *(pd for _, pd, _ in filas)]:
+        for prop in (
+            DEAL_PROP_FACTURA_DEL_PEDIDO,
+            DEAL_PROP_PACKING_LIST_PROEX,
+            DEAL_PROP_CARTA_DE_PORTE_PROEX,
+        ):
+            file_ids += parse_file_ids(deal_props.get(prop))[:1]
+    for cid, pd, documento_c in filas:
+        doc = documento_c[1] if documento_c else {}
+        file_ids += parse_file_ids(_doc_first(doc, pd, DEAL_PROP_BORRADOR_BL))
+        props = contenedores_props.get(cid) or {}
+        for prop in (
+            CONTENEDOR_PROP_DOCUMENTOS,
+            CONTENEDOR_PROP_OTROS_DOCUMENTOS,
+            CONTENEDOR_PROP_FOTOS_DE_CARGA,
+            CONTENEDOR_PROP_ALBARAN_MENSAJERIA,
+        ):
+            file_ids += parse_file_ids(props.get(prop))
+    return file_ids
 
 
 def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDetalleResponse:
@@ -908,6 +977,8 @@ def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDe
 
     deal_props_by_id = _batch_read_deals_detalle(client, list(all_deal_ids))
     contenedores_props = _batch_read_contenedores_detalle(client, contenedor_ids)
+    # La card pinta las filas en este orden: 001, 002…
+    contenedor_ids.sort(key=lambda cid: (contenedores_props.get(cid) or {}).get("nombre") or "")
 
     pedido_props = deal_props_by_id.get(pedido_deal_ids[0], {}) if pedido_deal_ids else {}
 
@@ -972,18 +1043,27 @@ def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDe
         for cid in contenedor_ids
     }
 
-    # Caché de metadata de ficheros por request: factura/packing/carta suelen
-    # compartir file_id entre los N pedido-deals, así se piden una sola vez.
-    meta_cache: Dict[str, object] = {}
-
-    contenedores = []
+    # Cambio 2 — booking, factura/packing/carta viven en el PEDIDO-deal del
+    # contenedor (1:1). El Negocio Documento (si existe) habilita la gestión.
+    filas: List[Tuple[str, dict, Optional[Tuple[str, dict]]]] = []
     for cid in contenedor_ids:
-        # Cambio 2 — booking, factura/packing/carta viven en el PEDIDO-deal del
-        # contenedor (1:1). El Negocio Documento (si existe) habilita la gestión.
         _, pedido_c, documento_c = _classify_deals(
             contenedor_to_deals.get(cid, []), deal_props_by_id,
         )
-        pd = pedido_c[1] if pedido_c else {}
+        filas.append((cid, pedido_c[1] if pedido_c else {}, documento_c))
+
+    cert_props = _merge_cert_props(contenedores_props, contenedor_ids) if contenedor_ids else {}
+
+    # Caché de metadata por request, precargada en paralelo: factura/packing/carta
+    # se repiten entre los N pedido-deals y el resto son ~0,3 s por fichero en serie.
+    meta_cache: Dict[str, object] = {}
+    _prefetch_file_metadata(
+        _detalle_file_ids(pedido_props, cert_props, contenedores_props, filas),
+        meta_cache,
+    )
+
+    contenedores = []
+    for cid, pd, documento_c in filas:
         doc = documento_c[1] if documento_c else {}
         documento_dealstage = (doc.get("dealstage") or None) if documento_c else None
         contenedores.append(
@@ -1008,9 +1088,10 @@ def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDe
                 bl_enviado_cliente=_parse_bool(_doc_first(doc, pd, DEAL_PROP_BL_ENVIADO_CLIENTE)),
                 tipo_de_bl=(_doc_first(doc, pd, DEAL_PROP_TIPO_DE_BL) or None),
                 cambios_en_bl=(_doc_first(doc, pd, DEAL_PROP_CAMBIOS_EN_BL) or None),
-                bl_archivos=_build_bl_archivos(_doc_first(doc, pd, DEAL_PROP_BORRADOR_BL)),
+                bl_archivos=_build_bl_archivos(_doc_first(doc, pd, DEAL_PROP_BORRADOR_BL), meta_cache),
                 tiene_negocio_documento=documento_c is not None,
                 documento_dealstage=documento_dealstage,
+                meta_cache=meta_cache,
             )
         )
 
@@ -1024,7 +1105,7 @@ def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDe
         info=_build_pedido_info(
             pedido_props,
             cotizacion_props,
-            _merge_cert_props(contenedores_props, contenedor_ids) if contenedor_ids else {},
+            cert_props,
             meta_cache=meta_cache,
         ),
         tipo_flujo=tipo_flujo,
