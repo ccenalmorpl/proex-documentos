@@ -196,6 +196,7 @@ export interface PedidoDetalleContenedor {
   albaran_mensajeria?: ArchivoSimple | null;
   // Cambio 2 — datos de factura de SAP por contenedor (solo lectura).
   numero_de_factura: string | null;
+  fecha_de_facturacion_pedido?: string | null;
   fecha_de_vencimiento_factura: string | null;
   // Cambio 2 — booking INDIVIDUAL por contenedor (sin fallback al del pedido).
   // Conduce el agrupado por embarque.

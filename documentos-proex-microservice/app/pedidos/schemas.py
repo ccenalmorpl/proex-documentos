@@ -145,6 +145,7 @@ class ContenedorDetalleItem(BaseModel):
     # Cambio 2 — datos de factura de SAP por contenedor (cada contenedor = un
     # pedido-deal con su factura). Solo lectura; se muestran en la tabla del 3er tab.
     numero_de_factura: Optional[str] = None
+    fecha_de_facturacion_pedido: Optional[str] = None
     fecha_de_vencimiento_factura: Optional[str] = None
     # Cambio 2 — props del pedido-deal del contenedor: booking individualizable y
     # documentos de cabecera (factura/packing/carta) propios de cada contenedor.

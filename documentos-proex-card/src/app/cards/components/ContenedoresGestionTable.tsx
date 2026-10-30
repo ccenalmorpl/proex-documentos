@@ -107,9 +107,6 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
   ).length;
   const todosSeleccionados = nGestionables > 0 && nSeleccionados >= nGestionables;
 
-  const diasFacturado = daysSince(pedidoInfo.fecha_de_facturacion_pedido);
-  const diasVencimiento = daysUntil(pedidoInfo.fecha_de_vencimiento_factura);
-
   return (
     <Flex direction="column" gap="sm">
       <Heading>{esCamion ? "Camiones del pedido" : "Contenedores del pedido"}</Heading>
@@ -173,6 +170,11 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
               : [];
             const resumenFila = resumenEstadoDocFila(docs);
             const booking = detalle ? bookingDeContenedor(detalle) : null;
+            // Facturación por contenedor: la del pedido es la de un deal cualquiera
+            // y marcaba FACTURADO a todos (P-65571985983).
+            const fechaFacturacion = detalle?.fecha_de_facturacion_pedido ?? null;
+            const diasFacturado = daysSince(fechaFacturacion);
+            const diasVencimiento = daysUntil(detalle?.fecha_de_vencimiento_factura);
             return (
               <TableRow key={c.id}>
                 <TableCell>
@@ -309,7 +311,7 @@ const ContenedoresGestionTable: React.FC<ContenedoresGestionTableProps> = ({
                             {diasFacturado >= 0 ? "FACTURADO" : "Factura prevista"}
                           </Tag>
                           <Text variant="microcopy">
-                            {formatDateES(pedidoInfo.fecha_de_facturacion_pedido)}
+                            {formatDateES(fechaFacturacion)}
                           </Text>
                         </Flex>
                       )}

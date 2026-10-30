@@ -614,6 +614,7 @@ def _build_contenedor_item(
     tipo_contenedor_labels: Dict[str, str],
     descripcion_mercancia_agregada: Optional[str] = None,
     numero_de_factura: Optional[str] = None,
+    fecha_de_facturacion_pedido: Optional[str] = None,
     fecha_de_vencimiento_factura: Optional[str] = None,
     numero_de_booking: Optional[str] = None,
     etd: Optional[str] = None,
@@ -676,6 +677,7 @@ def _build_contenedor_item(
             iter(_build_archivos_simples(props.get(CONTENEDOR_PROP_ALBARAN_MENSAJERIA), meta_cache)), None
         ),
         numero_de_factura=(numero_de_factura or None),
+        fecha_de_facturacion_pedido=(fecha_de_facturacion_pedido or None),
         fecha_de_vencimiento_factura=(fecha_de_vencimiento_factura or None),
         numero_de_booking=(numero_de_booking or None),
         factura_pedido=factura_pedido,
@@ -1073,6 +1075,7 @@ def _get_pedido_detalle_sync(numero_de_pedido: str, company_id: str) -> PedidoDe
                 tipo_contenedor_labels,
                 descripcion_por_contenedor.get(cid),
                 numero_de_factura=pd.get(DEAL_PROP_NUMERO_DE_FACTURA),
+                fecha_de_facturacion_pedido=pd.get(DEAL_PROP_FECHA_FACTURACION_PEDIDO),
                 fecha_de_vencimiento_factura=pd.get(DEAL_PROP_FECHA_VENCIMIENTO_FACTURA),
                 # BL, booking y ETD/ETA: Documento manda (fallback al Pedido del contenedor).
                 numero_de_booking=(_doc_first(doc, pd, DEAL_PROP_NUMERO_DE_BOOKING) or None),
