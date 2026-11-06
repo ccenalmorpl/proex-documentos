@@ -146,15 +146,8 @@ def render_origen_borrador_v2(payload: dict, debug: bool = False) -> bytes:
     buf_overlay.seek(0)
     logger.info(f"[PDF_V2_OVERLAY_READY] size={buf_overlay.getbuffer().nbytes} bytes")
 
-    reader_template = PdfReader(ORIGEN_BORRADOR_TEMPLATE)
-    reader_overlay  = PdfReader(buf_overlay)
-
-    base_page    = reader_template.pages[0]
-    overlay_page = reader_overlay.pages[0]
-    base_page.merge_page(overlay_page)
-
-    writer = PdfWriter()
-    writer.add_page(base_page)
+    writer = PdfWriter(clone_from=ORIGEN_BORRADOR_TEMPLATE)
+    writer.pages[0].merge_page(PdfReader(buf_overlay).pages[0])
 
     buf_final = io.BytesIO()
     writer.write(buf_final)
@@ -279,14 +272,8 @@ def render_sanitario_v2(payload: dict, debug: bool = False) -> bytes:
     buf_overlay.seek(0)
     logger.info(f"[PDF_V2_SANITARIO_OVERLAY_READY] size={buf_overlay.getbuffer().nbytes} bytes")
 
-    reader_template = PdfReader(SANITARIO_TEMPLATE)
-    reader_overlay  = PdfReader(buf_overlay)
-    base_page    = reader_template.pages[0]
-    overlay_page = reader_overlay.pages[0]
-    base_page.merge_page(overlay_page)
-
-    writer = PdfWriter()
-    writer.add_page(base_page)
+    writer = PdfWriter(clone_from=SANITARIO_TEMPLATE)
+    writer.pages[0].merge_page(PdfReader(buf_overlay).pages[0])
     buf_final = io.BytesIO()
     writer.write(buf_final)
     pdf_bytes = buf_final.getvalue()
