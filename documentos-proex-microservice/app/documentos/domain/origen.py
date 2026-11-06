@@ -1,7 +1,7 @@
 import random
 from collections import Counter
 from decimal import Decimal, InvalidOperation
-from typing import List
+from typing import List, Tuple
 
 from app.core.constants import CONTAINER_TYPE_DISPLAY, LANG_TO_NOMBRE_COLUMN, TRANSLATIONS
 
@@ -17,6 +17,39 @@ def format_european_number(value: float, decimals: int = 0) -> str:
     """Formato europeo: separador de miles '.', decimal ','. Ej: 22800.0 → '22.800,00'."""
     formatted = f"{value:,.{decimals}f}"
     return formatted.replace(",", "MILES").replace(".", ",").replace("MILES", ".")
+
+
+def _peso_elemento(element: dict, total_key: str, unitario_key: str) -> Decimal:
+    total = element.get(total_key)
+    if total:
+        return _safe_decimal(total)
+    return _safe_decimal(element.get(unitario_key)) * _safe_decimal(element.get("cantidad"))
+
+
+def pesos_embarque(
+    container_ids: List[str], containers: dict, elementos_by_container: dict
+) -> Tuple[Decimal, Decimal]:
+    """Peso neto y bruto del grupo de contenedores.
+
+    Manda lo que se graba en el Contenedor en el Día de carga; el teórico de los
+    Elementos (cajas × peso unitario de la proforma) solo cubre un contenedor sin pesos.
+    """
+    neto = Decimal("0")
+    bruto = Decimal("0")
+    for cid in container_ids:
+        props = containers.get(cid) or {}
+        elementos = elementos_by_container.get(cid, [])
+        neto_cargado = _safe_decimal(props.get("peso_neto"))
+        bruto_cargado = _safe_decimal(props.get("peso_bruto"))
+        neto += neto_cargado if neto_cargado > 0 else sum(
+            (_peso_elemento(e, "peso_neto_total", "peso_neto_unitario") for e in elementos),
+            Decimal("0"),
+        )
+        bruto += bruto_cargado if bruto_cargado > 0 else sum(
+            (_peso_elemento(e, "peso_bruto_total", "peso_bruto_unitario") for e in elementos),
+            Decimal("0"),
+        )
+    return neto, bruto
 
 
 def build_origen_payload(
@@ -64,38 +97,19 @@ def build_origen_payload(
 
     _lang_field = LANG_TO_NOMBRE_COLUMN.get(lang, "nombre_es")
 
-    product_map: dict[str, dict] = {}
+    cases_por_producto: dict[str, Decimal] = {}
     for cid in container_ids:
         for e in elementos_by_container.get(cid, []):
             nombre_lang = (e.get(_lang_field) or "").strip()
             nombre = nombre_lang if nombre_lang else (e.get("nombre") or "").strip()
-            if nombre not in product_map:
-                product_map[nombre] = {
-                    "total_cases": Decimal("0"),
-                    "peso_neto":   Decimal("0"),
-                    "peso_bruto":  Decimal("0"),
-                }
-            product_map[nombre]["total_cases"] += _safe_decimal(e.get("cantidad"))
+            cases_por_producto[nombre] = (
+                cases_por_producto.get(nombre, Decimal("0")) + _safe_decimal(e.get("cantidad"))
+            )
 
-            # Pesos: usa peso_*_total si existe, si no peso_*_unitario × cantidad
-            neto_total = e.get("peso_neto_total")
-            bruto_total = e.get("peso_bruto_total")
-            if neto_total:
-                product_map[nombre]["peso_neto"] += _safe_decimal(neto_total)
-            else:
-                product_map[nombre]["peso_neto"] += (
-                    _safe_decimal(e.get("peso_neto_unitario")) * _safe_decimal(e.get("cantidad"))
-                )
-            if bruto_total:
-                product_map[nombre]["peso_bruto"] += _safe_decimal(bruto_total)
-            else:
-                product_map[nombre]["peso_bruto"] += (
-                    _safe_decimal(e.get("peso_bruto_unitario")) * _safe_decimal(e.get("cantidad"))
-                )
-
-    total_cases      = sum((int(v["total_cases"]) for v in product_map.values()), 0)
-    total_peso_neto  = sum((v["peso_neto"]  for v in product_map.values()), Decimal("0"))
-    total_peso_bruto = sum((v["peso_bruto"] for v in product_map.values()), Decimal("0"))
+    total_cases = sum((int(v) for v in cases_por_producto.values()), 0)
+    total_peso_neto, total_peso_bruto = pesos_embarque(
+        container_ids, containers, elementos_by_container
+    )
 
     neto_float  = float(total_peso_neto.quantize(Decimal("0.01")))
     bruto_float = float(total_peso_bruto.quantize(Decimal("0.01")))

@@ -493,6 +493,8 @@ CONTENEDOR_GENERATE_PROPERTIES = [
     "numero_contenedor",
     "tipo_contenedor",
     "documentos_a_generar",
+    "peso_bruto",
+    "peso_neto",
     *ALL_CONTENEDOR_FILE_PROPERTY_NAMES,
 ]
 

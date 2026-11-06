@@ -6,17 +6,9 @@ from typing import Dict, List, Optional
 
 from app.core.config import Settings
 from app.core.constants import LANG_TO_NOMBRE_COLUMN, TRANSLATIONS
-from app.documentos.domain.origen import _safe_decimal, format_european_number
+from app.documentos.domain.origen import _safe_decimal, format_european_number, pesos_embarque
 
 logger = logging.getLogger(__name__)
-
-
-def _peso_efectivo(element: dict, total_key: str, unitario_key: str) -> Decimal:
-    """Peso efectivo: usa total si existe, si no unitario × cantidad. 0 si faltan datos."""
-    total = element.get(total_key)
-    if total:
-        return _safe_decimal(total)
-    return _safe_decimal(element.get(unitario_key)) * _safe_decimal(element.get("cantidad"))
 
 
 def build_sanitario_payload(
@@ -87,14 +79,10 @@ def build_sanitario_payload(
             if descripcion not in product_map:
                 product_map[descripcion] = {
                     "total_cases": Decimal("0"),
-                    "peso_neto":   Decimal("0"),
-                    "peso_bruto":  Decimal("0"),
                     "formato":     formato,
                     "marca":       marca,
                 }
             product_map[descripcion]["total_cases"] += _safe_decimal(e.get("cantidad"))
-            product_map[descripcion]["peso_neto"]   += _peso_efectivo(e, "peso_neto_total",  "peso_neto_unitario")
-            product_map[descripcion]["peso_bruto"]  += _peso_efectivo(e, "peso_bruto_total", "peso_bruto_unitario")
 
     productos = [
         {
@@ -127,8 +115,9 @@ def build_sanitario_payload(
     )
 
     total_cases      = sum((int(v["total_cases"]) for v in product_map.values()), 0)
-    total_peso_neto  = sum((v["peso_neto"]  for v in product_map.values()), Decimal("0"))
-    total_peso_bruto = sum((v["peso_bruto"] for v in product_map.values()), Decimal("0"))
+    total_peso_neto, total_peso_bruto = pesos_embarque(
+        container_ids, containers, elementos_by_container
+    )
 
     neto_float  = float(total_peso_neto.quantize(Decimal("0.01")))
     bruto_float = float(total_peso_bruto.quantize(Decimal("0.01")))
